@@ -173,3 +173,10 @@ receive their own bounded CFGs before downstream xref summarization. This
 supports conservative transitive direct-call trees without claiming recursive
 whole-program recovery, indirect-call recovery, prologue scanning, or complete
 instruction coverage.
+
+The IR-summary slice added a default analysis pass that lowers discovered CFG
+block instructions through the existing minimal x86-64 lifter, stores bounded
+per-block IR text and unknown counts in project state, exports those rows in
+`kaiju.project.v1`, and exposes them through `kaiju ir <file>`. This makes
+lifting visible in the headless project workflow without claiming SSA, type
+recovery, stack recovery, complete instruction semantics, or decompiler output.

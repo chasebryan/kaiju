@@ -23,12 +23,19 @@ The command loads a binary, runs the default analysis passes, and prints a
 - discovered functions from entrypoints, loader metadata, and direct call
   targets
 - basic block summaries
+- bounded derived IR summaries for discovered CFG blocks
 - extracted strings
 - flow, call, and conservative RIP-relative data cross-references
 - analysis facts
 
 The snapshot is intentionally derived output. It is not a stable editable
 project file yet.
+
+IR summaries are exported as top-level `ir_functions` rows and counted under
+`summary.ir_functions`. They contain function starts, optional function names,
+per-block labels, lifted instruction text, and unknown-instruction counts. The
+rows are regenerated analysis output, not user-authored IR and not decompiler
+output.
 
 Loader diagnostics are exported as a top-level `diagnostics` array and counted
 under `summary.diagnostics`. Diagnostic rows include a normalized severity and

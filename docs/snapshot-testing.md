@@ -10,6 +10,7 @@ Current snapshots live under `tests/snapshots/` and cover:
 - raw `strings`
 - raw `analyze`
 - raw `export`
+- raw `ir`
 - raw `dependencies`
 - raw `imports`
 - raw `exports`

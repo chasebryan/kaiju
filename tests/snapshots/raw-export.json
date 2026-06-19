@@ -20,11 +20,13 @@
     "strings": 1,
     "functions": 0,
     "blocks": 0,
+    "ir_functions": 0,
     "xrefs": 0,
-    "analysis_facts": 12
+    "analysis_facts": 15
   },
   "functions": [],
   "blocks": [],
+  "ir_functions": [],
   "diagnostics": [
     {
       "severity": "note",
@@ -95,6 +97,21 @@
     {
       "namespace": "function-discovery",
       "key": "symbols",
+      "value": "0"
+    },
+    {
+      "namespace": "ir-summary",
+      "key": "functions",
+      "value": "0"
+    },
+    {
+      "namespace": "ir-summary",
+      "key": "instructions",
+      "value": "0"
+    },
+    {
+      "namespace": "ir-summary",
+      "key": "unknowns",
       "value": "0"
     },
     {

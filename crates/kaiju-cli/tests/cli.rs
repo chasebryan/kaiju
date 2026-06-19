@@ -542,6 +542,28 @@ fn cli_lift_entry_reports_ir() {
 }
 
 #[test]
+fn cli_ir_reports_project_ir_summaries() {
+    let path = write_temp_elf_fixture();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("ir")
+        .arg(&path)
+        .output()
+        .expect("run kaiju ir on ELF");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Function  Blocks  Instructions  Unknowns  Name"));
+    assert!(stdout.contains("0x0000000000401000"));
+    assert!(stdout.contains("entry"));
+    assert!(stdout.contains("block_401000:"));
+    assert!(stdout.contains("rbp = rsp"));
+    assert!(stdout.contains("ret"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn cli_analyze_reports_project_summary() {
     let path = write_temp_cfg_elf_fixture();
 
@@ -553,18 +575,20 @@ fn cli_analyze_reports_project_summary() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
-    assert!(stdout.contains("Passes: 7"));
+    assert!(stdout.contains("Passes: 8"));
     assert!(stdout.contains("Dependencies: 0"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
     assert!(stdout.contains("Relocations: 0"));
     assert!(stdout.contains("Functions: 1"));
     assert!(stdout.contains("Blocks:"));
+    assert!(stdout.contains("IRFunctions: 1"));
     assert!(stdout.contains("Xrefs:"));
     assert!(stdout.contains("entrypoint-cfg"));
     assert!(stdout.contains("function-discovery"));
     assert!(stdout.contains("function-cfg"));
     assert!(stdout.contains("data-references"));
+    assert!(stdout.contains("ir-summary"));
 
     let _ = fs::remove_file(path);
 }
@@ -579,7 +603,7 @@ fn cli_analyze_raw_fixture_succeeds_with_warnings() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
-    assert!(stdout.contains("Passes: 7"));
+    assert!(stdout.contains("Passes: 8"));
     assert!(stdout.contains("Dependencies: 0"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
@@ -602,6 +626,7 @@ fn cli_export_reports_project_json() {
     assert!(stdout.contains("\"format\": \"Raw\""));
     assert!(stdout.contains("\"diagnostics\": 1"));
     assert!(stdout.contains("\"dependencies\": 0"));
+    assert!(stdout.contains("\"ir_functions\": 0"));
     assert!(stdout.contains("\"severity\": \"note\""));
     assert!(stdout.contains("\"strings\": 1"));
     assert!(stdout.contains("Kaiju raw fixture"));
@@ -1013,6 +1038,7 @@ fn cli_raw_fixture_snapshots_match() {
     assert_raw_snapshot(&["strings", RAW_FIXTURE_TOKEN], "raw-strings.txt");
     assert_raw_snapshot(&["analyze", RAW_FIXTURE_TOKEN], "raw-analyze.txt");
     assert_raw_snapshot(&["export", RAW_FIXTURE_TOKEN], "raw-export.json");
+    assert_raw_snapshot(&["ir", RAW_FIXTURE_TOKEN], "raw-ir.txt");
     assert_raw_snapshot(&["dependencies", RAW_FIXTURE_TOKEN], "raw-dependencies.txt");
     assert_raw_snapshot(&["imports", RAW_FIXTURE_TOKEN], "raw-imports.txt");
     assert_raw_snapshot(&["exports", RAW_FIXTURE_TOKEN], "raw-exports.txt");

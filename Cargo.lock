@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "kaiju-core",
  "kaiju-disasm",
+ "kaiju-ir",
  "kaiju-loader",
  "kaiju-project",
 ]

@@ -48,6 +48,7 @@ what works:
 - bounded direct-call CFG expansion for x86-64 functions
 - conservative RIP-relative data and string cross-references from decoded
   x86-64 basic blocks
+- bounded IR summaries for discovered x86-64 CFG blocks
 - project JSON export
 
 try:
@@ -62,6 +63,11 @@ cargo run -p kaiju-cli -- dependencies tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- imports tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- exports tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- relocations tests/fixtures/raw.bin
+cargo run -p kaiju-cli -- analyze tests/fixtures/raw.bin
+cargo run -p kaiju-cli -- export tests/fixtures/raw.bin
+cargo run -p kaiju-cli -- functions tests/fixtures/raw.bin
+cargo run -p kaiju-cli -- ir tests/fixtures/raw.bin
+cargo run -p kaiju-cli -- xrefs tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- network tests/fixtures/network-evidence.txt
 ```
 

@@ -5,10 +5,12 @@ use std::fmt;
 
 use kaiju_core::{Address, KaijuError, KaijuErrorKind, Result};
 use kaiju_disasm::{disassembler_for_architecture, Disassembler, FlowKind, Instruction};
+use kaiju_ir::{lift_instruction, IrInstruction};
 use kaiju_loader::LoadedBinary;
 use kaiju_project::{
     CrossReference, CrossReferenceKind, Project, ProjectBasicBlock, ProjectCfg, ProjectCfgEdge,
-    ProjectCfgEdgeKind, ProjectString, ProjectStringEncoding,
+    ProjectCfgEdgeKind, ProjectIrBlock, ProjectIrFunction, ProjectIrInstruction, ProjectString,
+    ProjectStringEncoding,
 };
 
 const MAX_INSTRUCTION_BYTES: usize = 15;
@@ -104,6 +106,7 @@ pub fn default_analysis_passes(config: AnalysisConfig) -> Vec<Box<dyn AnalysisPa
             options: config.cfg_options,
         }),
         Box::new(DataReferencePass),
+        Box::new(IrSummaryPass),
         Box::new(CrossReferenceSummaryPass),
     ]
 }
@@ -352,6 +355,43 @@ impl AnalysisPass for DataReferencePass {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IrSummaryPass;
+
+impl AnalysisPass for IrSummaryPass {
+    fn name(&self) -> &'static str {
+        "ir-summary"
+    }
+
+    fn run(&self, project: &mut Project) -> Result<AnalysisReport> {
+        let stats = match record_ir_summaries(project) {
+            Ok(stats) => stats,
+            Err(error) => {
+                return Ok(AnalysisReport::new(self.name())
+                    .with_warning(format!("IR summary skipped: {error}")))
+            }
+        };
+
+        project.add_analysis_fact(kaiju_project::AnalysisFact::new(
+            self.name(),
+            "functions",
+            stats.functions.to_string(),
+        ));
+        project.add_analysis_fact(kaiju_project::AnalysisFact::new(
+            self.name(),
+            "instructions",
+            stats.instructions.to_string(),
+        ));
+        project.add_analysis_fact(kaiju_project::AnalysisFact::new(
+            self.name(),
+            "unknowns",
+            stats.unknowns.to_string(),
+        ));
+
+        Ok(AnalysisReport::new(self.name()).with_facts(stats.functions + stats.instructions))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlFlowGraph {
     pub function_start: Address,
@@ -428,6 +468,13 @@ pub struct FunctionCfgStats {
     pub skipped: usize,
     pub promoted_call_targets: usize,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IrSummaryStats {
+    pub functions: usize,
+    pub instructions: usize,
+    pub unknowns: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -697,6 +744,123 @@ fn promote_direct_call_target_functions(project: &mut Project) -> usize {
     }
 
     promoted
+}
+
+pub fn record_ir_summaries(project: &mut Project) -> Result<IrSummaryStats> {
+    if project.basic_blocks().is_empty() {
+        return Ok(IrSummaryStats::default());
+    }
+
+    let disassembler = disassembler_for_architecture(project.binary.arch)?;
+    let function_rows = project
+        .functions()
+        .values()
+        .map(|function| {
+            (
+                function.start,
+                function.name.clone(),
+                function.block_starts.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut stats = IrSummaryStats::default();
+    let mut summaries = Vec::new();
+
+    for (function_start, function_name, block_starts) in function_rows {
+        if block_starts.is_empty() {
+            continue;
+        }
+
+        let mut blocks = Vec::new();
+        for block_start in block_starts {
+            let Some(block) = project.basic_block(block_start) else {
+                continue;
+            };
+            let ir_block = lift_project_block(project, &disassembler, block)?;
+            stats.instructions += ir_block.instructions.len();
+            stats.unknowns += ir_block
+                .instructions
+                .iter()
+                .filter(|instruction| instruction.unknown)
+                .count();
+            blocks.push(ir_block);
+        }
+
+        if blocks.is_empty() {
+            continue;
+        }
+
+        let instruction_count = blocks
+            .iter()
+            .map(|block| block.instructions.len())
+            .sum::<usize>();
+        let unknown_count = blocks
+            .iter()
+            .flat_map(|block| block.instructions.iter())
+            .filter(|instruction| instruction.unknown)
+            .count();
+        summaries.push(ProjectIrFunction {
+            start: function_start,
+            name: function_name,
+            instruction_count,
+            unknown_count,
+            blocks,
+        });
+        stats.functions += 1;
+    }
+
+    for summary in summaries {
+        project.add_ir_function(summary);
+    }
+
+    Ok(stats)
+}
+
+fn lift_project_block(
+    project: &Project,
+    disassembler: &impl Disassembler,
+    block: &ProjectBasicBlock,
+) -> Result<ProjectIrBlock> {
+    let mut current = block.start;
+    let mut decoded = 0_usize;
+    let mut instructions = Vec::new();
+
+    while current < block.end && decoded < block.instruction_count {
+        let bytes = read_instruction_window(&project.binary, current)?;
+        let instruction = disassembler.disassemble_one(&bytes, current)?;
+        if instruction.size == 0 {
+            return Err(KaijuError::new(
+                KaijuErrorKind::DecodeError,
+                "decoder returned a zero-sized instruction",
+            ));
+        }
+
+        let ir_instruction = lift_instruction(&instruction);
+        instructions.push(ProjectIrInstruction {
+            address: instruction.address,
+            text: ir_instruction.to_string(),
+            unknown: matches!(ir_instruction, IrInstruction::Unknown),
+        });
+        current = current
+            .checked_add(u64::from(instruction.size))
+            .ok_or_else(|| {
+                KaijuError::new(
+                    KaijuErrorKind::InvalidAddress,
+                    "instruction address overflow during IR summary generation",
+                )
+            })?;
+        decoded += 1;
+    }
+
+    Ok(ProjectIrBlock {
+        start: block.start,
+        label: block_label(block.start),
+        instructions,
+    })
+}
+
+fn block_label(address: Address) -> String {
+    format!("block_{:x}", address.value())
 }
 
 pub fn record_data_references(project: &mut Project) -> Result<DataReferenceStats> {
@@ -1298,9 +1462,10 @@ mod tests {
         let reports = run_default_passes(&mut project, AnalysisConfig::default())
             .expect("run default passes");
 
-        assert_eq!(reports.len(), 7);
+        assert_eq!(reports.len(), 8);
         assert!(project.function(Address::new(0x6000)).is_some());
         assert!(!project.basic_blocks().is_empty());
+        assert!(!project.ir_functions().is_empty());
         assert!(!project.xrefs().is_empty());
         assert!(project
             .analysis_facts()
@@ -1317,7 +1482,47 @@ mod tests {
         assert!(project
             .analysis_facts()
             .iter()
+            .any(|fact| fact.namespace == "ir-summary"));
+        assert!(project
+            .analysis_facts()
+            .iter()
             .any(|fact| fact.namespace == "xref-summary"));
+    }
+
+    #[test]
+    fn default_analysis_records_ir_summaries_for_cfg_blocks() {
+        let binary = test_binary(
+            Address::new(0xc000),
+            vec![0x55, 0x48, 0x89, 0xe5, 0xc3],
+            ArchitectureId::X86_64,
+        );
+        let mut project = Project::from_loaded_binary(binary);
+
+        let reports = run_default_passes(&mut project, AnalysisConfig::default())
+            .expect("run default passes");
+        let ir_report = reports
+            .iter()
+            .find(|report| report.pass_name == "ir-summary")
+            .expect("ir summary report");
+        let ir_function = project
+            .ir_function(Address::new(0xc000))
+            .expect("ir function summary");
+
+        assert_eq!(ir_report.facts_added, 4);
+        assert_eq!(ir_function.instruction_count, 3);
+        assert_eq!(ir_function.unknown_count, 0);
+        assert_eq!(ir_function.blocks.len(), 1);
+        assert!(ir_function.blocks[0]
+            .instructions
+            .iter()
+            .any(|instruction| instruction.text == "rbp = rsp"));
+        assert!(ir_function.blocks[0]
+            .instructions
+            .iter()
+            .any(|instruction| instruction.text == "ret"));
+        assert!(project.analysis_facts().iter().any(|fact| {
+            fact.namespace == "ir-summary" && fact.key == "instructions" && fact.value == "3"
+        }));
     }
 
     #[test]

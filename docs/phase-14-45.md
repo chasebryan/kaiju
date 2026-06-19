@@ -58,6 +58,7 @@ scripting runtime, or decompiler work:
 - CLI `export`, `functions`, `xrefs`, and `arch` commands.
 - conservative function discovery, bounded direct-call CFG expansion, and
   RIP-relative data/string xrefs.
+- bounded derived IR summaries for discovered CFG blocks.
 - documented future boundaries for GUI, plugins, scripting, fuzzing, snapshots,
   and release readiness.
 

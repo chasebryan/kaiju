@@ -126,6 +126,12 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), CliError> {
             print_functions(&project);
             Ok(())
         }
+        "ir" => {
+            let path = read_single_path_arg(&mut args, "ir")?;
+            let (project, _reports) = analyze_project(path)?;
+            print_ir_summaries(&project);
+            Ok(())
+        }
         "symbols" => {
             let path = read_single_path_arg(&mut args, "symbols")?;
             let binary = load_path(path)?;
@@ -770,6 +776,7 @@ fn print_usage() {
     eprintln!("  kaiju analyze <file>");
     eprintln!("  kaiju export <file>");
     eprintln!("  kaiju functions <file>");
+    eprintln!("  kaiju ir <file>");
     eprintln!("  kaiju symbols <file>");
     eprintln!("  kaiju dependencies <file>");
     eprintln!("  kaiju imports <file>");
@@ -1115,6 +1122,7 @@ fn print_analysis_summary(project: &Project, reports: &[AnalysisReport]) {
     println!("Strings: {}", project.strings().len());
     println!("Functions: {}", project.functions().len());
     println!("Blocks: {}", project.basic_blocks().len());
+    println!("IRFunctions: {}", project.ir_functions().len());
     println!("Xrefs: {}", project.xrefs().len());
     println!("AnalysisFacts: {}", project.analysis_facts().len());
     println!("Reports:");
@@ -1179,6 +1187,27 @@ fn print_functions(project: &Project) {
             name,
             function.block_starts.len()
         );
+    }
+}
+
+fn print_ir_summaries(project: &Project) {
+    println!("Function  Blocks  Instructions  Unknowns  Name");
+    for function in project.ir_functions().values() {
+        let name = function.name.as_deref().unwrap_or("-");
+        println!(
+            "{}  {}  {}  {}  {}",
+            function.start,
+            function.blocks.len(),
+            function.instruction_count,
+            function.unknown_count,
+            name
+        );
+        for block in &function.blocks {
+            println!("{}:", block.label);
+            for instruction in &block.instructions {
+                println!("  {}  {}", instruction.address, instruction.text);
+            }
+        }
     }
 }
 

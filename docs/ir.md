@@ -1,6 +1,6 @@
 # Kaiju IR
 
-Kaiju IR is planned for a later milestone. It should be backend-independent,
+Kaiju IR is being built incrementally. It should remain backend-independent,
 explicit about side effects, and useful for data-flow analysis and eventual
 decompilation.
 
@@ -16,8 +16,6 @@ The initial IR model will include:
 - register references
 - memory loads and stores
 - branches, calls, and returns
-
-No instruction lifting is implemented in the current foundation phase.
 
 ## Current Implementation
 
@@ -41,6 +39,12 @@ model. It handles simple register moves, arithmetic and logic assignments,
 placeholder flag updates for `cmp` and `test`, direct branches, conditional
 branches, calls, returns, and stack-shaped `push`/`pop` placeholders. Unknown
 or unsupported instructions lower to `unknown` instead of failing the lift.
+
+The current default analysis pipeline also records bounded IR summaries for
+discovered CFG blocks. The `kaiju ir <file>` command prints those summaries, and
+`kaiju export <file>` includes them under top-level `ir_functions` rows. These
+rows are deterministic derived facts with per-instruction lifted text and
+unknown counts; they are not SSA, type recovery, or decompiler output.
 
 Current limitations:
 

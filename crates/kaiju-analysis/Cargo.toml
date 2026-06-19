@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 kaiju-core = { path = "../kaiju-core" }
 kaiju-disasm = { path = "../kaiju-disasm" }
+kaiju-ir = { path = "../kaiju-ir" }
 kaiju-loader = { path = "../kaiju-loader" }
 kaiju-project = { path = "../kaiju-project" }
 

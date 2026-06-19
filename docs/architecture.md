@@ -117,7 +117,8 @@ pub trait AnalysisPass {
 Current default passes cover string extraction, entrypoint function seeding,
 entrypoint CFG construction, conservative function discovery, bounded
 fixed-point CFG construction for direct-call-reachable functions, conservative
-RIP-relative data/string reference discovery, and cross-reference summarization.
+RIP-relative data/string reference discovery, bounded IR summaries for
+discovered CFG blocks, and cross-reference summarization.
 
 ## CFG Model
 
@@ -160,8 +161,10 @@ functions when they point into executable mapped memory, function CFG analysis
 can iteratively promote direct call targets and build bounded direct-branch
 graphs for functions that do not already have a starting block, and
 data-reference analysis can record mapped RIP-relative `lea`/`mov` references
-from decoded x86-64 basic blocks. Later phases can add persistence and richer
-xref provenance on top of this model.
+from decoded x86-64 basic blocks, and IR summary analysis can record derived
+per-block lifted instruction text and unknown counts for discovered x86-64 CFG
+blocks. Later phases can add persistence and richer xref provenance on top of
+this model.
 
 ## IR And Lifting Model
 
@@ -173,6 +176,11 @@ The lifter is intentionally conservative. It handles a small instruction subset
 and emits `unknown` for shapes it cannot represent. This keeps headless lifting
 usable without claiming complete x86 semantics.
 
+The default analysis pipeline records bounded project IR summaries by
+redisassembling discovered basic blocks and lowering each instruction through
+the same lifter. These summaries are deterministic export rows, not SSA,
+type recovery, or decompiler output.
+
 ## Default Analysis Runner
 
 The analysis crate now defines an `AnalysisPass` trait and a small default
@@ -181,10 +189,10 @@ when one exists, attempts an entrypoint CFG, promotes conservative function
 seeds from loader symbols, exports, and direct call targets, iterates bounded
 direct-call target promotion with CFG construction for functions that do not
 already have a starting block, records conservative RIP-relative data/string
-cross-references from decoded x86-64 basic blocks, and summarizes
-cross-references. CFG failures from unsupported architectures are reported as
-warnings so raw or unsupported files can still produce a useful analysis
-summary.
+cross-references from decoded x86-64 basic blocks, records bounded IR summaries
+for discovered CFG blocks, and summarizes cross-references. CFG and IR failures
+from unsupported architectures are reported as warnings so raw or unsupported
+files can still produce a useful analysis summary.
 
 ## Plugin And Scripting Boundaries
 
@@ -209,8 +217,8 @@ can move through these descriptors.
 The project crate can now produce a deterministic `kaiju.project.v1` JSON
 snapshot. The snapshot is derived output for headless automation and tests. It
 includes binary metadata, summary counts, discovered functions, block summaries,
-loader diagnostics, dependencies, symbols, imports, exports, relocations,
-strings, xrefs, and analysis facts.
+derived IR summaries, loader diagnostics, dependencies, symbols, imports,
+exports, relocations, strings, xrefs, and analysis facts.
 
 This is not a full project database. Future `.kaiju` persistence should keep
 user annotations separate from regenerated analysis facts.

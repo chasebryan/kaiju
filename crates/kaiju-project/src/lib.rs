@@ -12,6 +12,7 @@ pub struct Project {
     comments: BTreeMap<Address, Vec<String>>,
     functions: BTreeMap<Address, ProjectFunction>,
     basic_blocks: BTreeMap<Address, ProjectBasicBlock>,
+    ir_functions: BTreeMap<Address, ProjectIrFunction>,
     cfg_edges: BTreeSet<ProjectCfgEdge>,
     strings: Vec<ProjectString>,
     dependencies: Vec<ProjectDependency>,
@@ -46,6 +47,7 @@ impl Project {
             comments: BTreeMap::new(),
             functions: BTreeMap::new(),
             basic_blocks: BTreeMap::new(),
+            ir_functions: BTreeMap::new(),
             cfg_edges: BTreeSet::new(),
             strings: Vec::new(),
             dependencies,
@@ -130,6 +132,20 @@ impl Project {
     #[must_use]
     pub const fn basic_blocks(&self) -> &BTreeMap<Address, ProjectBasicBlock> {
         &self.basic_blocks
+    }
+
+    pub fn add_ir_function(&mut self, function: ProjectIrFunction) {
+        self.ir_functions.insert(function.start, function);
+    }
+
+    #[must_use]
+    pub fn ir_function(&self, start: Address) -> Option<&ProjectIrFunction> {
+        self.ir_functions.get(&start)
+    }
+
+    #[must_use]
+    pub const fn ir_functions(&self) -> &BTreeMap<Address, ProjectIrFunction> {
+        &self.ir_functions
     }
 
     pub fn add_string(&mut self, string: ProjectString) {
@@ -301,6 +317,7 @@ impl Project {
             string_count: self.strings.len(),
             function_count: self.functions.len(),
             block_count: self.basic_blocks.len(),
+            ir_function_count: self.ir_functions.len(),
             xref_count: self.xrefs.len(),
             analysis_fact_count: self.analysis_facts.len(),
         }
@@ -366,6 +383,13 @@ impl Project {
         push_json_usize_field(&mut json, 4, "strings", summary.string_count, true);
         push_json_usize_field(&mut json, 4, "functions", summary.function_count, true);
         push_json_usize_field(&mut json, 4, "blocks", summary.block_count, true);
+        push_json_usize_field(
+            &mut json,
+            4,
+            "ir_functions",
+            summary.ir_function_count,
+            true,
+        );
         push_json_usize_field(&mut json, 4, "xrefs", summary.xref_count, true);
         push_json_usize_field(
             &mut json,
@@ -378,6 +402,8 @@ impl Project {
         push_functions_json(&mut json, self);
         json.push_str(",\n");
         push_blocks_json(&mut json, self);
+        json.push_str(",\n");
+        push_ir_functions_json(&mut json, self);
         json.push_str(",\n");
         push_diagnostics_json(&mut json, self);
         json.push_str(",\n");
@@ -421,6 +447,7 @@ pub struct ProjectSummary {
     pub string_count: usize,
     pub function_count: usize,
     pub block_count: usize,
+    pub ir_function_count: usize,
     pub xref_count: usize,
     pub analysis_fact_count: usize,
 }
@@ -452,6 +479,42 @@ pub struct ProjectBasicBlock {
     pub start: Address,
     pub end: Address,
     pub instruction_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectIrFunction {
+    pub start: Address,
+    pub name: Option<String>,
+    pub instruction_count: usize,
+    pub unknown_count: usize,
+    pub blocks: Vec<ProjectIrBlock>,
+}
+
+impl ProjectIrFunction {
+    #[must_use]
+    pub const fn new(start: Address) -> Self {
+        Self {
+            start,
+            name: None,
+            instruction_count: 0,
+            unknown_count: 0,
+            blocks: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectIrBlock {
+    pub start: Address,
+    pub label: String,
+    pub instructions: Vec<ProjectIrInstruction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectIrInstruction {
+    pub address: Address,
+    pub text: String,
+    pub unknown: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -686,6 +749,113 @@ fn push_blocks_json(json: &mut String, project: &Project) {
         json.push('\n');
     }
     json.push_str("  ]");
+}
+
+fn push_ir_functions_json(json: &mut String, project: &Project) {
+    json.push_str("  \"ir_functions\": [");
+    if project.ir_functions.is_empty() {
+        json.push(']');
+        return;
+    }
+    json.push('\n');
+    for (index, function) in project.ir_functions.values().enumerate() {
+        let comma = if index + 1 == project.ir_functions.len() {
+            ""
+        } else {
+            ","
+        };
+        json.push_str("    {\n");
+        push_json_address_field(json, 6, "start", Some(function.start), true);
+        match &function.name {
+            Some(name) => push_json_field(json, 6, "name", name, true),
+            None => push_json_null_field(json, 6, "name", true),
+        }
+        push_json_usize_field(
+            json,
+            6,
+            "instruction_count",
+            function.instruction_count,
+            true,
+        );
+        push_json_usize_field(json, 6, "unknown_count", function.unknown_count, true);
+        push_ir_blocks_json(json, 6, "blocks", &function.blocks, false);
+        json.push_str("    }");
+        json.push_str(comma);
+        json.push('\n');
+    }
+    json.push_str("  ]");
+}
+
+fn push_ir_blocks_json(
+    json: &mut String,
+    indent: usize,
+    name: &str,
+    blocks: &[ProjectIrBlock],
+    trailing_comma: bool,
+) {
+    push_indent(json, indent);
+    json.push('"');
+    json.push_str(name);
+    json.push_str("\": [");
+    if blocks.is_empty() {
+        json.push(']');
+        push_comma_newline(json, trailing_comma);
+        return;
+    }
+    json.push('\n');
+    for (index, block) in blocks.iter().enumerate() {
+        let comma = if index + 1 == blocks.len() { "" } else { "," };
+        push_indent(json, indent + 2);
+        json.push_str("{\n");
+        push_json_address_field(json, indent + 4, "start", Some(block.start), true);
+        push_json_field(json, indent + 4, "label", &block.label, true);
+        push_ir_instructions_json(json, indent + 4, "instructions", &block.instructions, false);
+        push_indent(json, indent + 2);
+        json.push('}');
+        json.push_str(comma);
+        json.push('\n');
+    }
+    push_indent(json, indent);
+    json.push(']');
+    push_comma_newline(json, trailing_comma);
+}
+
+fn push_ir_instructions_json(
+    json: &mut String,
+    indent: usize,
+    name: &str,
+    instructions: &[ProjectIrInstruction],
+    trailing_comma: bool,
+) {
+    push_indent(json, indent);
+    json.push('"');
+    json.push_str(name);
+    json.push_str("\": [");
+    if instructions.is_empty() {
+        json.push(']');
+        push_comma_newline(json, trailing_comma);
+        return;
+    }
+    json.push('\n');
+    for (index, instruction) in instructions.iter().enumerate() {
+        let comma = if index + 1 == instructions.len() {
+            ""
+        } else {
+            ","
+        };
+        push_indent(json, indent + 2);
+        json.push_str("{\n");
+        push_json_address_field(json, indent + 4, "address", Some(instruction.address), true);
+        push_json_field(json, indent + 4, "text", &instruction.text, true);
+        push_json_bool_field(json, indent + 4, "unknown", instruction.unknown, false);
+        push_indent(json, indent + 2);
+        json.push('}');
+        json.push_str(comma);
+        json.push('\n');
+    }
+    push_indent(json, indent);
+    json.push(']');
+    push_comma_newline(json, trailing_comma);
 }
 
 fn push_diagnostics_json(json: &mut String, project: &Project) {
@@ -985,6 +1155,21 @@ fn push_json_u32_field(
     json.push_str(name);
     json.push_str("\": ");
     json.push_str(&value.to_string());
+    push_comma_newline(json, trailing_comma);
+}
+
+fn push_json_bool_field(
+    json: &mut String,
+    indent: usize,
+    name: &str,
+    value: bool,
+    trailing_comma: bool,
+) {
+    push_indent(json, indent);
+    json.push('"');
+    json.push_str(name);
+    json.push_str("\": ");
+    json.push_str(if value { "true" } else { "false" });
     push_comma_newline(json, trailing_comma);
 }
 
@@ -1347,6 +1532,51 @@ mod tests {
             to: Address::new(0x1002),
             kind: CrossReferenceKind::Flow,
         }));
+    }
+
+    #[test]
+    fn stores_ir_summaries_in_project_json() {
+        let mut project = Project::from_loaded_binary(test_binary());
+
+        project.add_ir_function(ProjectIrFunction {
+            start: Address::new(0x1000),
+            name: Some("entry".to_string()),
+            instruction_count: 2,
+            unknown_count: 1,
+            blocks: vec![ProjectIrBlock {
+                start: Address::new(0x1000),
+                label: "block_1000".to_string(),
+                instructions: vec![
+                    ProjectIrInstruction {
+                        address: Address::new(0x1000),
+                        text: "rax = 0x1".to_string(),
+                        unknown: false,
+                    },
+                    ProjectIrInstruction {
+                        address: Address::new(0x1005),
+                        text: "unknown".to_string(),
+                        unknown: true,
+                    },
+                ],
+            }],
+        });
+
+        let summary = project.summary();
+        let json = project.to_json_pretty();
+
+        assert_eq!(summary.ir_function_count, 1);
+        assert_eq!(
+            project
+                .ir_function(Address::new(0x1000))
+                .unwrap()
+                .unknown_count,
+            1
+        );
+        assert!(json.contains("\"ir_functions\": 1"));
+        assert!(json.contains("\"ir_functions\": ["));
+        assert!(json.contains("\"label\": \"block_1000\""));
+        assert!(json.contains("\"text\": \"rax = 0x1\""));
+        assert!(json.contains("\"unknown\": true"));
     }
 
     #[test]

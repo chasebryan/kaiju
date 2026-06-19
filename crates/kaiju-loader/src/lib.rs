@@ -338,11 +338,28 @@ impl Loader for ElfLoader {
     fn load(&self, path: PathBuf, bytes: &[u8]) -> Result<LoadedBinary> {
         let header = parse_elf_header(bytes)?;
         let program_headers = parse_elf_program_headers(bytes, &header)?;
-        let sections = parse_elf_sections(bytes, &header)?;
-        let symbols = parse_elf_symbols(bytes, &header)?;
+        let raw_sections = parse_elf_section_headers(bytes, &header)?;
+        let sections = parse_elf_sections(bytes, &header, &raw_sections)?;
+        let elf_symbols = parse_elf_symbol_entries(bytes, &header, &raw_sections)?;
+        let elf_relocations = parse_elf_relocation_entries(bytes, &header, &raw_sections)?;
+        let symbols = elf_symbols
+            .iter()
+            .map(|symbol| Symbol {
+                name: symbol.name.clone(),
+                address: symbol.address,
+            })
+            .collect();
+        let imports = elf_imports_from_symbols(&elf_symbols, &elf_relocations);
+        let relocations = elf_relocations
+            .iter()
+            .map(|relocation| Relocation {
+                address: relocation.address,
+                kind: relocation.kind.clone(),
+            })
+            .collect();
         let mut memory_map = MemoryMap::new();
         let mut diagnostics = vec![loader_note(
-            "ELF loader uses limited metadata parsing; imports and relocations are not yet populated",
+            "ELF loader uses limited metadata parsing; dynamic symbols and relocation tables are parsed without versioning or full dependency resolution",
         )];
 
         for (index, program_header) in program_headers
@@ -399,9 +416,9 @@ impl Loader for ElfLoader {
             memory_map,
             sections,
             symbols,
-            imports: Vec::new(),
+            imports,
             exports: Vec::new(),
-            relocations: Vec::new(),
+            relocations,
             diagnostics,
         })
     }
@@ -432,7 +449,9 @@ const ELFDATA2MSB: u8 = 2;
 const PT_LOAD: u32 = 1;
 const SHT_SYMTAB: u32 = 2;
 const SHT_STRTAB: u32 = 3;
+const SHT_RELA: u32 = 4;
 const SHT_NOBITS: u32 = 8;
+const SHT_REL: u32 = 9;
 const SHT_DYNSYM: u32 = 11;
 const SHN_UNDEF: u16 = 0;
 const SHF_WRITE: u64 = 0x1;
@@ -441,6 +460,10 @@ const SHF_EXECINSTR: u64 = 0x4;
 const PF_X: u32 = 0x1;
 const PF_W: u32 = 0x2;
 const PF_R: u32 = 0x4;
+const EM_386: u16 = 3;
+const EM_ARM: u16 = 40;
+const EM_X86_64: u16 = 62;
+const EM_AARCH64: u16 = 183;
 const PE_SIGNATURE: &[u8; 4] = b"PE\0\0";
 const PE_COFF_HEADER_SIZE: u64 = 20;
 const PE_SECTION_HEADER_SIZE: u16 = 40;
@@ -538,6 +561,24 @@ struct ElfSectionHeader {
     size: u64,
     link: u32,
     entry_size: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ElfSymbolEntry {
+    table_section_index: usize,
+    symbol_index: u64,
+    is_dynamic: bool,
+    name: String,
+    section_index: u16,
+    address: Option<Address>,
+}
+
+#[derive(Debug, Clone)]
+struct ElfRelocationEntry {
+    address: Address,
+    kind: String,
+    symbol_table_section_index: Option<usize>,
+    symbol_index: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2053,9 +2094,12 @@ fn parse_elf_section_headers(bytes: &[u8], header: &ElfHeader) -> Result<Vec<Elf
     Ok(raw_sections)
 }
 
-fn parse_elf_sections(bytes: &[u8], header: &ElfHeader) -> Result<Vec<Section>> {
-    let raw_sections = parse_elf_section_headers(bytes, header)?;
-    let name_table = section_name_table(bytes, header, &raw_sections)?;
+fn parse_elf_sections(
+    bytes: &[u8],
+    header: &ElfHeader,
+    raw_sections: &[ElfSectionHeader],
+) -> Result<Vec<Section>> {
+    let name_table = section_name_table(bytes, header, raw_sections)?;
     let mut sections = Vec::with_capacity(raw_sections.len());
     for (index, section) in raw_sections.iter().enumerate() {
         let name = section_name(name_table, section.name_offset)
@@ -2079,22 +2123,23 @@ fn parse_elf_sections(bytes: &[u8], header: &ElfHeader) -> Result<Vec<Section>> 
     Ok(sections)
 }
 
-fn parse_elf_symbols(bytes: &[u8], header: &ElfHeader) -> Result<Vec<Symbol>> {
-    let raw_sections = parse_elf_section_headers(bytes, header)?;
+fn parse_elf_symbol_entries(
+    bytes: &[u8],
+    header: &ElfHeader,
+    raw_sections: &[ElfSectionHeader],
+) -> Result<Vec<ElfSymbolEntry>> {
     let mut symbols = Vec::new();
 
-    for section in raw_sections
+    for (table_section_index, section) in raw_sections
         .iter()
-        .filter(|section| matches!(section.section_type, SHT_SYMTAB | SHT_DYNSYM))
+        .enumerate()
+        .filter(|(_, section)| matches!(section.section_type, SHT_SYMTAB | SHT_DYNSYM))
     {
         if section.size == 0 {
             continue;
         }
 
-        let minimum_entry_size = match header.class {
-            ElfClass::Elf32 => 16,
-            ElfClass::Elf64 => 24,
-        };
+        let minimum_entry_size = elf_symbol_entry_size(header.class);
         if section.entry_size < minimum_entry_size {
             return Err(malformed("ELF symbol table entry size is too small"));
         }
@@ -2133,7 +2178,15 @@ fn parse_elf_symbols(bytes: &[u8], header: &ElfHeader) -> Result<Vec<Symbol>> {
                         .ok_or_else(|| malformed("ELF symbol table offset overflow"))?,
                 )
                 .ok_or_else(|| malformed("ELF symbol table offset overflow"))?;
-            if let Some(symbol) = parse_elf_symbol(bytes, header, string_table, base)? {
+            if let Some(symbol) = parse_elf_symbol_entry(
+                bytes,
+                header,
+                string_table,
+                base,
+                table_section_index,
+                index,
+                section.section_type == SHT_DYNSYM,
+            )? {
                 symbols.push(symbol);
             }
         }
@@ -2142,12 +2195,15 @@ fn parse_elf_symbols(bytes: &[u8], header: &ElfHeader) -> Result<Vec<Symbol>> {
     Ok(symbols)
 }
 
-fn parse_elf_symbol(
+fn parse_elf_symbol_entry(
     bytes: &[u8],
     header: &ElfHeader,
     string_table: &[u8],
     base: u64,
-) -> Result<Option<Symbol>> {
+    table_section_index: usize,
+    symbol_index: u64,
+    is_dynamic: bool,
+) -> Result<Option<ElfSymbolEntry>> {
     let (name_offset, section_index, value) = match header.class {
         ElfClass::Elf32 => (
             read_u32(bytes, base, header.endian, "ELF st_name")?,
@@ -2170,7 +2226,225 @@ fn parse_elf_symbol(
         Some(Address::new(value))
     };
 
-    Ok(Some(Symbol { name, address }))
+    Ok(Some(ElfSymbolEntry {
+        table_section_index,
+        symbol_index,
+        is_dynamic,
+        name,
+        section_index,
+        address,
+    }))
+}
+
+fn parse_elf_relocation_entries(
+    bytes: &[u8],
+    header: &ElfHeader,
+    raw_sections: &[ElfSectionHeader],
+) -> Result<Vec<ElfRelocationEntry>> {
+    let mut relocations = Vec::new();
+
+    for section in raw_sections
+        .iter()
+        .filter(|section| matches!(section.section_type, SHT_REL | SHT_RELA))
+    {
+        if section.size == 0 {
+            continue;
+        }
+
+        let is_rela = section.section_type == SHT_RELA;
+        let minimum_entry_size = elf_relocation_entry_size(header.class, is_rela);
+        if section.entry_size < minimum_entry_size {
+            return Err(malformed("ELF relocation table entry size is too small"));
+        }
+        if section.size % section.entry_size != 0 {
+            return Err(malformed(
+                "ELF relocation table size is not a multiple of entry size",
+            ));
+        }
+
+        let symbol_table_section_index = elf_relocation_symbol_table_index(raw_sections, section)?;
+        checked_range(bytes, section.offset, section.size, "ELF relocation table")?;
+        let relocation_count = section.size / section.entry_size;
+        for index in 0..relocation_count {
+            let base = section
+                .offset
+                .checked_add(
+                    index
+                        .checked_mul(section.entry_size)
+                        .ok_or_else(|| malformed("ELF relocation table offset overflow"))?,
+                )
+                .ok_or_else(|| malformed("ELF relocation table offset overflow"))?;
+            let (address, info) = match header.class {
+                ElfClass::Elf32 => (
+                    u64::from(read_u32(
+                        bytes,
+                        base,
+                        header.endian,
+                        "ELF relocation offset",
+                    )?),
+                    u64::from(read_u32(
+                        bytes,
+                        base + 4,
+                        header.endian,
+                        "ELF relocation info",
+                    )?),
+                ),
+                ElfClass::Elf64 => (
+                    read_u64(bytes, base, header.endian, "ELF relocation offset")?,
+                    read_u64(bytes, base + 8, header.endian, "ELF relocation info")?,
+                ),
+            };
+            let (symbol_index, relocation_type) = elf_relocation_info(header.class, info);
+            let symbol_index = if symbol_index == 0 {
+                None
+            } else {
+                let Some(table_index) = symbol_table_section_index else {
+                    return Err(malformed(
+                        "ELF relocation references a symbol without a linked symbol table",
+                    ));
+                };
+                validate_elf_symbol_index(raw_sections, header, table_index, symbol_index)?;
+                Some(symbol_index)
+            };
+
+            relocations.push(ElfRelocationEntry {
+                address: Address::new(address),
+                kind: elf_relocation_kind(header.machine, relocation_type),
+                symbol_table_section_index,
+                symbol_index,
+            });
+        }
+    }
+
+    Ok(relocations)
+}
+
+fn elf_imports_from_symbols(
+    symbols: &[ElfSymbolEntry],
+    relocations: &[ElfRelocationEntry],
+) -> Vec<Import> {
+    let mut imports = Vec::new();
+    for symbol in symbols.iter().filter(|symbol| {
+        symbol.is_dynamic && symbol.section_index == SHN_UNDEF && !symbol.name.is_empty()
+    }) {
+        let thunk = relocations
+            .iter()
+            .find(|relocation| {
+                relocation.symbol_table_section_index == Some(symbol.table_section_index)
+                    && relocation.symbol_index == Some(symbol.symbol_index)
+            })
+            .map(|relocation| relocation.address);
+        imports.push(Import {
+            library: "ELF".to_string(),
+            name: Some(symbol.name.clone()),
+            ordinal: None,
+            thunk,
+        });
+    }
+    imports
+}
+
+fn elf_symbol_entry_size(class: ElfClass) -> u64 {
+    match class {
+        ElfClass::Elf32 => 16,
+        ElfClass::Elf64 => 24,
+    }
+}
+
+fn elf_relocation_entry_size(class: ElfClass, is_rela: bool) -> u64 {
+    match (class, is_rela) {
+        (ElfClass::Elf32, false) => 8,
+        (ElfClass::Elf32, true) => 12,
+        (ElfClass::Elf64, false) => 16,
+        (ElfClass::Elf64, true) => 24,
+    }
+}
+
+fn elf_relocation_symbol_table_index(
+    raw_sections: &[ElfSectionHeader],
+    relocation_section: &ElfSectionHeader,
+) -> Result<Option<usize>> {
+    if relocation_section.link == 0 {
+        return Ok(None);
+    }
+
+    let link_index = usize::try_from(relocation_section.link)
+        .map_err(|_| malformed("ELF relocation symbol table index does not fit in usize"))?;
+    let Some(symbol_section) = raw_sections.get(link_index) else {
+        return Err(malformed(
+            "ELF relocation symbol table index is out of range",
+        ));
+    };
+    if !matches!(symbol_section.section_type, SHT_SYMTAB | SHT_DYNSYM) {
+        return Err(malformed(
+            "ELF relocation table link does not point to a symbol table",
+        ));
+    }
+
+    Ok(Some(link_index))
+}
+
+fn validate_elf_symbol_index(
+    raw_sections: &[ElfSectionHeader],
+    header: &ElfHeader,
+    table_index: usize,
+    symbol_index: u64,
+) -> Result<()> {
+    let symbol_section = raw_sections
+        .get(table_index)
+        .ok_or_else(|| malformed("ELF relocation symbol table index is out of range"))?;
+    let minimum_entry_size = elf_symbol_entry_size(header.class);
+    if symbol_section.entry_size < minimum_entry_size {
+        return Err(malformed("ELF symbol table entry size is too small"));
+    }
+    if symbol_section.size % symbol_section.entry_size != 0 {
+        return Err(malformed(
+            "ELF symbol table size is not a multiple of entry size",
+        ));
+    }
+
+    let symbol_count = symbol_section.size / symbol_section.entry_size;
+    if symbol_index >= symbol_count {
+        return Err(malformed("ELF relocation symbol index is out of range"));
+    }
+
+    Ok(())
+}
+
+fn elf_relocation_info(class: ElfClass, info: u64) -> (u64, u64) {
+    match class {
+        ElfClass::Elf32 => (info >> 8, info & 0xff),
+        ElfClass::Elf64 => (info >> 32, info & 0xffff_ffff),
+    }
+}
+
+fn elf_relocation_kind(machine: u16, relocation_type: u64) -> String {
+    match machine {
+        EM_386 => match relocation_type {
+            1 => "elf-i386-32".to_string(),
+            2 => "elf-i386-pc32".to_string(),
+            6 => "elf-i386-glob-dat".to_string(),
+            7 => "elf-i386-jump-slot".to_string(),
+            8 => "elf-i386-relative".to_string(),
+            _ => format!("elf-i386-unknown-{relocation_type}"),
+        },
+        EM_X86_64 => match relocation_type {
+            1 => "elf-x86_64-64".to_string(),
+            2 => "elf-x86_64-pc32".to_string(),
+            6 => "elf-x86_64-glob-dat".to_string(),
+            7 => "elf-x86_64-jump-slot".to_string(),
+            8 => "elf-x86_64-relative".to_string(),
+            _ => format!("elf-x86_64-unknown-{relocation_type}"),
+        },
+        EM_AARCH64 => match relocation_type {
+            257 => "elf-aarch64-abs64".to_string(),
+            1025 => "elf-aarch64-glob-dat".to_string(),
+            1026 => "elf-aarch64-jump-slot".to_string(),
+            1027 => "elf-aarch64-relative".to_string(),
+            _ => format!("elf-aarch64-unknown-{relocation_type}"),
+        },
+        _ => format!("elf-relocation-{relocation_type}"),
+    }
 }
 
 fn section_name_table<'a>(
@@ -2342,10 +2616,10 @@ fn read_u64(bytes: &[u8], offset: u64, endian: Endian, context: &str) -> Result<
 
 fn elf_machine_to_arch(machine: u16) -> ArchitectureId {
     match machine {
-        3 => ArchitectureId::X86,
-        40 => ArchitectureId::Arm,
-        62 => ArchitectureId::X86_64,
-        183 => ArchitectureId::Aarch64,
+        EM_386 => ArchitectureId::X86,
+        EM_ARM => ArchitectureId::Arm,
+        EM_X86_64 => ArchitectureId::X86_64,
+        EM_AARCH64 => ArchitectureId::Aarch64,
         _ => ArchitectureId::Unknown,
     }
 }
@@ -2743,6 +3017,31 @@ mod tests {
     }
 
     #[test]
+    fn loads_elf64_imports_and_relocations() {
+        let bytes = synthetic_elf64_le_with_imports_and_relocations();
+        let binary = load_bytes(PathBuf::from("sample.elf"), &bytes).expect("load ELF");
+
+        assert_eq!(binary.format, BinaryFormat::Elf);
+        assert!(binary
+            .symbols
+            .iter()
+            .any(|symbol| symbol.name == "puts" && symbol.address.is_none()));
+        assert!(binary.symbols.iter().any(|symbol| {
+            symbol.name == "printf" && symbol.address == Some(Address::new(0x401000))
+        }));
+        assert_eq!(binary.imports.len(), 1);
+        assert_eq!(binary.imports[0].library, "ELF");
+        assert_eq!(binary.imports[0].name.as_deref(), Some("puts"));
+        assert_eq!(binary.imports[0].ordinal, None);
+        assert_eq!(binary.imports[0].thunk, Some(Address::new(0x402000)));
+        assert_eq!(binary.relocations.len(), 2);
+        assert_eq!(binary.relocations[0].address, Address::new(0x402000));
+        assert_eq!(binary.relocations[0].kind, "elf-x86_64-jump-slot");
+        assert_eq!(binary.relocations[1].address, Address::new(0x402008));
+        assert_eq!(binary.relocations[1].kind, "elf-x86_64-relative");
+    }
+
+    #[test]
     fn truncated_elf_returns_clean_error() {
         let error = load_bytes(PathBuf::from("bad.elf"), b"\x7fELF")
             .expect_err("truncated ELF should fail");
@@ -2809,6 +3108,39 @@ mod tests {
 
         let error =
             load_bytes(PathBuf::from("bad.elf"), &bytes).expect_err("bad symbols should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn elf_relocation_table_bad_link_returns_clean_error() {
+        let mut bytes = synthetic_elf64_le_with_imports_and_relocations();
+        write_u32_le(&mut bytes, 0x100 + (5 * 64) + 40, 99);
+
+        let error =
+            load_bytes(PathBuf::from("bad.elf"), &bytes).expect_err("bad relocation should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn elf_relocation_table_bad_entry_size_returns_clean_error() {
+        let mut bytes = synthetic_elf64_le_with_imports_and_relocations();
+        write_u64_le(&mut bytes, 0x100 + (5 * 64) + 56, 16);
+
+        let error =
+            load_bytes(PathBuf::from("bad.elf"), &bytes).expect_err("bad relocation should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn elf_relocation_symbol_index_out_of_range_returns_clean_error() {
+        let mut bytes = synthetic_elf64_le_with_imports_and_relocations();
+        write_u64_le(&mut bytes, 0x420 + 8, (9_u64 << 32) | 7);
+
+        let error =
+            load_bytes(PathBuf::from("bad.elf"), &bytes).expect_err("bad relocation should fail");
 
         assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
     }
@@ -3242,7 +3574,7 @@ mod tests {
         bytes[6] = 1;
 
         write_u16_le(&mut bytes, 16, 2);
-        write_u16_le(&mut bytes, 18, 62);
+        write_u16_le(&mut bytes, 18, EM_X86_64);
         write_u32_le(&mut bytes, 20, 1);
         write_u64_le(&mut bytes, 24, 0x401000);
         write_u64_le(&mut bytes, 32, 0x40);
@@ -3328,6 +3660,116 @@ mod tests {
         bytes
     }
 
+    fn synthetic_elf64_le_with_imports_and_relocations() -> Vec<u8> {
+        let mut bytes = vec![0_u8; 0x600];
+        bytes[0..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = ELFCLASS64;
+        bytes[5] = ELFDATA2LSB;
+        bytes[6] = 1;
+
+        write_u16_le(&mut bytes, 16, 2);
+        write_u16_le(&mut bytes, 18, EM_X86_64);
+        write_u32_le(&mut bytes, 20, 1);
+        write_u64_le(&mut bytes, 24, 0x401000);
+        write_u64_le(&mut bytes, 32, 0x40);
+        write_u64_le(&mut bytes, 40, 0x100);
+        write_u16_le(&mut bytes, 52, 64);
+        write_u16_le(&mut bytes, 54, 56);
+        write_u16_le(&mut bytes, 56, 1);
+        write_u16_le(&mut bytes, 58, 64);
+        write_u16_le(&mut bytes, 60, 6);
+        write_u16_le(&mut bytes, 62, 2);
+
+        write_u32_le(&mut bytes, 0x40, PT_LOAD);
+        write_u32_le(&mut bytes, 0x40 + 4, PF_R | PF_X);
+        write_u64_le(&mut bytes, 0x40 + 8, 0x300);
+        write_u64_le(&mut bytes, 0x40 + 16, 0x401000);
+        write_u64_le(&mut bytes, 0x40 + 32, 4);
+        write_u64_le(&mut bytes, 0x40 + 40, 0x2000);
+        write_u64_le(&mut bytes, 0x40 + 48, 0x1000);
+
+        write_section64(
+            &mut bytes,
+            0x100 + 64,
+            Section64Spec {
+                name: 1,
+                section_type: 1,
+                flags: SHF_ALLOC | SHF_EXECINSTR,
+                address: 0x401000,
+                file_offset: 0x300,
+                size: 4,
+                link: 0,
+                entry_size: 0,
+            },
+        );
+        write_section64(
+            &mut bytes,
+            0x100 + 128,
+            Section64Spec {
+                name: 7,
+                section_type: SHT_STRTAB,
+                flags: 0,
+                address: 0,
+                file_offset: 0x340,
+                size: 43,
+                link: 0,
+                entry_size: 0,
+            },
+        );
+        write_section64(
+            &mut bytes,
+            0x100 + 192,
+            Section64Spec {
+                name: 17,
+                section_type: SHT_STRTAB,
+                flags: 0,
+                address: 0,
+                file_offset: 0x390,
+                size: 13,
+                link: 0,
+                entry_size: 0,
+            },
+        );
+        write_section64(
+            &mut bytes,
+            0x100 + 256,
+            Section64Spec {
+                name: 25,
+                section_type: SHT_DYNSYM,
+                flags: 0,
+                address: 0,
+                file_offset: 0x3c0,
+                size: 72,
+                link: 3,
+                entry_size: 24,
+            },
+        );
+        write_section64(
+            &mut bytes,
+            0x100 + 320,
+            Section64Spec {
+                name: 33,
+                section_type: SHT_RELA,
+                flags: 0,
+                address: 0,
+                file_offset: 0x420,
+                size: 48,
+                link: 4,
+                entry_size: 24,
+            },
+        );
+
+        bytes[0x300..0x304].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
+        bytes[0x340..0x36b].copy_from_slice(b"\0.text\0.shstrtab\0.dynstr\0.dynsym\0.rela.plt\0");
+        bytes[0x390..0x39d].copy_from_slice(b"\0puts\0printf\0");
+        write_elf64_symbol(&mut bytes, 0x3c0 + 24, 1, 0x12, SHN_UNDEF, 0, 0);
+        write_elf64_symbol(&mut bytes, 0x3c0 + 48, 6, 0x12, 1, 0x401000, 0);
+        write_elf64_rela(&mut bytes, 0x420, 0x402000, 1, 7, 0);
+        write_elf64_rela(&mut bytes, 0x420 + 24, 0x402008, 0, 8, 0x401000);
+
+        bytes
+    }
+
     struct Section64Spec {
         name: u32,
         section_type: u32,
@@ -3364,6 +3806,19 @@ mod tests {
         write_u16_le(bytes, offset + 6, section_index);
         write_u64_le(bytes, offset + 8, value);
         write_u64_le(bytes, offset + 16, size);
+    }
+
+    fn write_elf64_rela(
+        bytes: &mut [u8],
+        offset: usize,
+        relocation_offset: u64,
+        symbol_index: u64,
+        relocation_type: u64,
+        addend: u64,
+    ) {
+        write_u64_le(bytes, offset, relocation_offset);
+        write_u64_le(bytes, offset + 8, (symbol_index << 32) | relocation_type);
+        write_u64_le(bytes, offset + 16, addend);
     }
 
     struct PeSectionSpec {

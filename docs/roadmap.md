@@ -115,3 +115,8 @@ relocation blocks, ABSOLUTE padding, DIR64/HIGHLOW/HIGH entries, and unknown
 nonzero relocation types, plus malformed relocation-block tests, project
 relocation coverage, and a read-only `kaiju relocations <file>` command without
 claiming PE COFF symbols.
+
+The ELF dynamic relocation slice added bounded REL/RELA relocation-table
+parsing, undefined `.dynsym` import rows, relocation-to-import thunk linking,
+malformed relocation-table tests, and CLI coverage for ELF imports and
+relocations without claiming dependency/version resolution.

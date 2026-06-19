@@ -164,6 +164,47 @@ fn cli_relocations_reports_pe_base_relocations() {
 }
 
 #[test]
+fn cli_imports_reports_elf_imports() {
+    let path = write_temp_elf_dynamic_fixture();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("imports")
+        .arg(&path)
+        .output()
+        .expect("run kaiju imports on ELF");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Library  Name  Ordinal  Thunk"));
+    assert!(stdout.contains("ELF"));
+    assert!(stdout.contains("puts"));
+    assert!(stdout.contains("0x0000000000402000"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn cli_relocations_reports_elf_relocations() {
+    let path = write_temp_elf_dynamic_fixture();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("relocations")
+        .arg(&path)
+        .output()
+        .expect("run kaiju relocations on ELF");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Address  Kind"));
+    assert!(stdout.contains("0x0000000000402000"));
+    assert!(stdout.contains("elf-x86_64-jump-slot"));
+    assert!(stdout.contains("0x0000000000402008"));
+    assert!(stdout.contains("elf-x86_64-relative"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn cli_exports_reports_pe_exports() {
     let path = write_temp_pe_export_fixture();
 
@@ -617,6 +658,20 @@ fn write_temp_cfg_elf_fixture() -> PathBuf {
     path
 }
 
+fn write_temp_elf_dynamic_fixture() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "kaiju-cli-dynamic-elf-{}-{unique}.bin",
+        process::id()
+    ));
+    fs::write(&path, synthetic_elf64_le_with_imports_and_relocations())
+        .expect("write dynamic ELF fixture");
+    path
+}
+
 fn write_temp_pe_fixture() -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -796,6 +851,116 @@ fn synthetic_elf64_le_with_code(code: &[u8]) -> Vec<u8> {
     bytes
 }
 
+fn synthetic_elf64_le_with_imports_and_relocations() -> Vec<u8> {
+    let mut bytes = vec![0_u8; 0x600];
+    bytes[0..4].copy_from_slice(b"\x7fELF");
+    bytes[4] = 2;
+    bytes[5] = 1;
+    bytes[6] = 1;
+
+    write_u16_le(&mut bytes, 16, 2);
+    write_u16_le(&mut bytes, 18, 62);
+    write_u32_le(&mut bytes, 20, 1);
+    write_u64_le(&mut bytes, 24, 0x401000);
+    write_u64_le(&mut bytes, 32, 0x40);
+    write_u64_le(&mut bytes, 40, 0x100);
+    write_u16_le(&mut bytes, 52, 64);
+    write_u16_le(&mut bytes, 54, 56);
+    write_u16_le(&mut bytes, 56, 1);
+    write_u16_le(&mut bytes, 58, 64);
+    write_u16_le(&mut bytes, 60, 6);
+    write_u16_le(&mut bytes, 62, 2);
+
+    write_u32_le(&mut bytes, 0x40, 1);
+    write_u32_le(&mut bytes, 0x40 + 4, 5);
+    write_u64_le(&mut bytes, 0x40 + 8, 0x300);
+    write_u64_le(&mut bytes, 0x40 + 16, 0x401000);
+    write_u64_le(&mut bytes, 0x40 + 32, 4);
+    write_u64_le(&mut bytes, 0x40 + 40, 0x2000);
+    write_u64_le(&mut bytes, 0x40 + 48, 0x1000);
+
+    write_elf_section64(
+        &mut bytes,
+        0x100 + 64,
+        ElfSection64Spec {
+            name: 1,
+            section_type: 1,
+            flags: 0x6,
+            address: 0x401000,
+            file_offset: 0x300,
+            size: 4,
+            link: 0,
+            entry_size: 0,
+        },
+    );
+    write_elf_section64(
+        &mut bytes,
+        0x100 + 128,
+        ElfSection64Spec {
+            name: 7,
+            section_type: 3,
+            flags: 0,
+            address: 0,
+            file_offset: 0x340,
+            size: 43,
+            link: 0,
+            entry_size: 0,
+        },
+    );
+    write_elf_section64(
+        &mut bytes,
+        0x100 + 192,
+        ElfSection64Spec {
+            name: 17,
+            section_type: 3,
+            flags: 0,
+            address: 0,
+            file_offset: 0x390,
+            size: 13,
+            link: 0,
+            entry_size: 0,
+        },
+    );
+    write_elf_section64(
+        &mut bytes,
+        0x100 + 256,
+        ElfSection64Spec {
+            name: 25,
+            section_type: 11,
+            flags: 0,
+            address: 0,
+            file_offset: 0x3c0,
+            size: 72,
+            link: 3,
+            entry_size: 24,
+        },
+    );
+    write_elf_section64(
+        &mut bytes,
+        0x100 + 320,
+        ElfSection64Spec {
+            name: 33,
+            section_type: 4,
+            flags: 0,
+            address: 0,
+            file_offset: 0x420,
+            size: 48,
+            link: 4,
+            entry_size: 24,
+        },
+    );
+
+    bytes[0x300..0x304].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
+    bytes[0x340..0x36b].copy_from_slice(b"\0.text\0.shstrtab\0.dynstr\0.dynsym\0.rela.plt\0");
+    bytes[0x390..0x39d].copy_from_slice(b"\0puts\0printf\0");
+    write_elf64_symbol(&mut bytes, 0x3c0 + 24, 1, 0x12, 0, 0, 0);
+    write_elf64_symbol(&mut bytes, 0x3c0 + 48, 6, 0x12, 1, 0x401000, 0);
+    write_elf64_rela(&mut bytes, 0x420, 0x402000, 1, 7, 0);
+    write_elf64_rela(&mut bytes, 0x420 + 24, 0x402008, 0, 8, 0x401000);
+
+    bytes
+}
+
 struct ElfSection64Spec {
     name: u32,
     section_type: u32,
@@ -832,6 +997,19 @@ fn write_elf64_symbol(
     write_u16_le(bytes, offset + 6, section_index);
     write_u64_le(bytes, offset + 8, value);
     write_u64_le(bytes, offset + 16, size);
+}
+
+fn write_elf64_rela(
+    bytes: &mut [u8],
+    offset: usize,
+    relocation_offset: u64,
+    symbol_index: u64,
+    relocation_type: u64,
+    addend: u64,
+) {
+    write_u64_le(bytes, offset, relocation_offset);
+    write_u64_le(bytes, offset + 8, (symbol_index << 32) | relocation_type);
+    write_u64_le(bytes, offset + 16, addend);
 }
 
 fn synthetic_pe32_plus() -> Vec<u8> {

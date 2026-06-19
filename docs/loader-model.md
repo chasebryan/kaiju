@@ -15,7 +15,8 @@ Kaiju loads bytes first, then normalizes recognized file formats into a common
 ## Current Formats
 
 - ELF: limited parser for class, endian, machine, entrypoint, section headers,
-  `PT_LOAD` memory regions, and `.symtab` / `.dynsym` symbol names.
+  `PT_LOAD` memory regions, `.symtab` / `.dynsym` symbol names, undefined
+  dynamic imports, and REL/RELA relocation rows.
 - PE: limited parser for PE32/PE32+, machine, image base, entrypoint, section
   headers, section-backed memory regions, import tables, export tables, and
   base relocation tables.
@@ -81,7 +82,7 @@ Loader code must:
 
 ## Future Work
 
-The next loader expansions should add ELF imports/relocations, PE COFF symbols,
-richer Mach-O symbols/imports/relocations, universal/fat Mach-O member
+The next loader expansions should add ELF dependency/version resolution, PE COFF
+symbols, richer Mach-O symbols/imports/relocations, universal/fat Mach-O member
 selection, and fuzz targets for malformed headers and inconsistent
 section/segment tables.

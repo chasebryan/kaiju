@@ -25,6 +25,8 @@ what works:
 - memory maps
 - Mach-O segment maps
 - ELF symbol tables
+- ELF dynamic imports
+- ELF relocation tables
 - PE import tables
 - PE export tables
 - PE base relocations

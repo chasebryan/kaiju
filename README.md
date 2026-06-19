@@ -25,6 +25,7 @@ what works:
 - memory maps
 - Mach-O segment maps
 - ELF symbol tables
+- PE import tables
 - strings
 - loader diagnostics
 - small x86-64 disassembly
@@ -39,6 +40,7 @@ cargo run -p kaiju-cli -- info tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- map tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- diagnostics tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- symbols tests/fixtures/raw.bin
+cargo run -p kaiju-cli -- imports tests/fixtures/raw.bin
 ```
 
 not yet:

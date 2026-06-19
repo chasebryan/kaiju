@@ -42,6 +42,7 @@ pub struct LoadedBinary {
     pub memory_map: MemoryMap,
     pub sections: Vec<Section>,
     pub symbols: Vec<Symbol>,
+    pub imports: Vec<Import>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -58,6 +59,14 @@ pub struct Section {
 pub struct Symbol {
     pub name: String,
     pub address: Option<Address>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Import {
+    pub library: String,
+    pub name: Option<String>,
+    pub ordinal: Option<u16>,
+    pub thunk: Option<Address>,
 }
 
 pub trait Loader {
@@ -202,6 +211,7 @@ impl Loader for MachOLoader {
                     memory_map,
                     sections,
                     symbols: Vec::new(),
+                    imports: Vec::new(),
                     diagnostics,
                 })
             }
@@ -223,9 +233,10 @@ impl Loader for PeLoader {
     fn load(&self, path: PathBuf, bytes: &[u8]) -> Result<LoadedBinary> {
         let header = parse_pe_header(bytes)?;
         let sections = parse_pe_sections(bytes, &header)?;
+        let imports = parse_pe_imports(bytes, &header, &sections)?;
         let mut memory_map = MemoryMap::new();
         let mut diagnostics = vec![loader_note(
-            "PE loader uses limited metadata parsing; symbols, imports, and relocations are not yet populated",
+            "PE loader uses limited metadata parsing; symbols and relocations are not yet populated",
         )];
 
         for section in &sections {
@@ -283,6 +294,7 @@ impl Loader for PeLoader {
                 })
                 .collect(),
             symbols: Vec::new(),
+            imports,
             diagnostics,
         })
     }
@@ -363,6 +375,7 @@ impl Loader for ElfLoader {
             memory_map,
             sections,
             symbols,
+            imports: Vec::new(),
             diagnostics,
         })
     }
@@ -407,6 +420,17 @@ const PE_COFF_HEADER_SIZE: u64 = 20;
 const PE_SECTION_HEADER_SIZE: u16 = 40;
 const PE32_MAGIC: u16 = 0x10b;
 const PE32_PLUS_MAGIC: u16 = 0x20b;
+const PE32_NUMBER_OF_RVA_AND_SIZES_OFFSET: u64 = 92;
+const PE32_PLUS_NUMBER_OF_RVA_AND_SIZES_OFFSET: u64 = 108;
+const PE32_DATA_DIRECTORY_OFFSET: u64 = 96;
+const PE32_PLUS_DATA_DIRECTORY_OFFSET: u64 = 112;
+const PE_DATA_DIRECTORY_SIZE: u64 = 8;
+const PE_IMPORT_DIRECTORY_INDEX: u32 = 1;
+const PE_IMPORT_DESCRIPTOR_SIZE: u64 = 20;
+const PE32_IMPORT_LOOKUP_ENTRY_SIZE: u64 = 4;
+const PE32_PLUS_IMPORT_LOOKUP_ENTRY_SIZE: u64 = 8;
+const PE32_ORDINAL_FLAG: u64 = 0x8000_0000;
+const PE32_PLUS_ORDINAL_FLAG: u64 = 0x8000_0000_0000_0000;
 const IMAGE_FILE_MACHINE_I386: u16 = 0x014c;
 const IMAGE_FILE_MACHINE_ARMNT: u16 = 0x01c4;
 const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
@@ -484,16 +508,25 @@ enum PeKind {
 
 #[derive(Debug, Clone, Copy)]
 struct PeHeader {
+    kind: PeKind,
     machine: u16,
     image_base: u64,
     entrypoint: Option<Address>,
     section_table_offset: u64,
     section_count: u16,
+    import_directory: Option<PeDataDirectory>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PeDataDirectory {
+    rva: u32,
+    size: u32,
 }
 
 #[derive(Debug, Clone)]
 struct PeSection {
     name: String,
+    virtual_address: u64,
     address: Address,
     file_offset: Option<u64>,
     size: u64,
@@ -562,6 +595,7 @@ fn load_as_single_region(
         memory_map,
         sections: Vec::new(),
         symbols: Vec::new(),
+        imports: Vec::new(),
         diagnostics,
     }
 }
@@ -947,14 +981,84 @@ fn parse_pe_header(bytes: &[u8]) -> Result<PeHeader> {
         u64::from(optional_header_size),
         "PE section table offset",
     )?;
+    let import_directory = parse_pe_import_directory(
+        bytes,
+        kind,
+        optional_header_offset,
+        u64::from(optional_header_size),
+    )?;
 
     Ok(PeHeader {
+        kind,
         machine,
         image_base,
         entrypoint,
         section_table_offset,
         section_count,
+        import_directory,
     })
+}
+
+fn parse_pe_import_directory(
+    bytes: &[u8],
+    kind: PeKind,
+    optional_header_offset: u64,
+    optional_header_size: u64,
+) -> Result<Option<PeDataDirectory>> {
+    let (number_offset, directory_offset) = match kind {
+        PeKind::Pe32 => (
+            PE32_NUMBER_OF_RVA_AND_SIZES_OFFSET,
+            PE32_DATA_DIRECTORY_OFFSET,
+        ),
+        PeKind::Pe32Plus => (
+            PE32_PLUS_NUMBER_OF_RVA_AND_SIZES_OFFSET,
+            PE32_PLUS_DATA_DIRECTORY_OFFSET,
+        ),
+    };
+
+    if optional_header_size < number_offset + 4 {
+        return Ok(None);
+    }
+
+    let directory_count = read_u32(
+        bytes,
+        optional_header_offset + number_offset,
+        Endian::Little,
+        "PE number of data directories",
+    )?;
+    if directory_count <= PE_IMPORT_DIRECTORY_INDEX {
+        return Ok(None);
+    }
+
+    let import_directory_offset = directory_offset
+        .checked_add(
+            u64::from(PE_IMPORT_DIRECTORY_INDEX)
+                .checked_mul(PE_DATA_DIRECTORY_SIZE)
+                .ok_or_else(|| malformed("PE import directory offset overflow"))?,
+        )
+        .ok_or_else(|| malformed("PE import directory offset overflow"))?;
+    if optional_header_size < import_directory_offset + PE_DATA_DIRECTORY_SIZE {
+        return Err(malformed("PE import data directory is truncated"));
+    }
+
+    let rva = read_u32(
+        bytes,
+        optional_header_offset + import_directory_offset,
+        Endian::Little,
+        "PE import directory RVA",
+    )?;
+    let size = read_u32(
+        bytes,
+        optional_header_offset + import_directory_offset + 4,
+        Endian::Little,
+        "PE import directory size",
+    )?;
+
+    if rva == 0 || size == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(PeDataDirectory { rva, size }))
+    }
 }
 
 fn parse_pe_sections(bytes: &[u8], header: &PeHeader) -> Result<Vec<PeSection>> {
@@ -1021,6 +1125,7 @@ fn parse_pe_sections(bytes: &[u8], header: &PeHeader) -> Result<Vec<PeSection>> 
 
         sections.push(PeSection {
             name,
+            virtual_address,
             address,
             file_offset,
             size,
@@ -1043,6 +1148,285 @@ fn pe_section_name(bytes: &[u8], index: usize) -> String {
     } else {
         name
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PeFileLocation {
+    offset: u64,
+    limit: u64,
+}
+
+fn parse_pe_imports(
+    bytes: &[u8],
+    header: &PeHeader,
+    sections: &[PeSection],
+) -> Result<Vec<Import>> {
+    let Some(import_directory) = header.import_directory else {
+        return Ok(Vec::new());
+    };
+
+    let import_size = u64::from(import_directory.size);
+    let directory_location = pe_rva_to_file_location(u64::from(import_directory.rva), sections)
+        .ok_or_else(|| malformed("PE import directory RVA does not map to file data"))?;
+    let directory_end = checked_add_offset(
+        directory_location.offset,
+        import_size,
+        "PE import directory",
+    )?;
+    if directory_end > directory_location.limit {
+        return Err(malformed(
+            "PE import directory extends beyond section file data",
+        ));
+    }
+    checked_range(
+        bytes,
+        directory_location.offset,
+        import_size,
+        "PE import directory",
+    )?;
+
+    let mut imports = Vec::new();
+    let mut descriptor_offset = directory_location.offset;
+    while checked_add_offset(
+        descriptor_offset,
+        PE_IMPORT_DESCRIPTOR_SIZE,
+        "PE import descriptor",
+    )? <= directory_end
+    {
+        let original_first_thunk = read_u32(
+            bytes,
+            descriptor_offset,
+            Endian::Little,
+            "PE import original first thunk",
+        )?;
+        let time_date_stamp = read_u32(
+            bytes,
+            descriptor_offset + 4,
+            Endian::Little,
+            "PE import time date stamp",
+        )?;
+        let forwarder_chain = read_u32(
+            bytes,
+            descriptor_offset + 8,
+            Endian::Little,
+            "PE import forwarder chain",
+        )?;
+        let name_rva = read_u32(
+            bytes,
+            descriptor_offset + 12,
+            Endian::Little,
+            "PE import DLL name RVA",
+        )?;
+        let first_thunk = read_u32(
+            bytes,
+            descriptor_offset + 16,
+            Endian::Little,
+            "PE import first thunk",
+        )?;
+
+        if original_first_thunk == 0
+            && time_date_stamp == 0
+            && forwarder_chain == 0
+            && name_rva == 0
+            && first_thunk == 0
+        {
+            return Ok(imports);
+        }
+
+        if name_rva == 0 {
+            return Err(malformed("PE import descriptor DLL name RVA is zero"));
+        }
+        let lookup_table_rva = if original_first_thunk == 0 {
+            first_thunk
+        } else {
+            original_first_thunk
+        };
+        if lookup_table_rva == 0 {
+            return Err(malformed("PE import descriptor has no lookup table"));
+        }
+
+        let library = read_pe_c_string(bytes, sections, u64::from(name_rva), "PE import DLL name")?;
+        imports.extend(parse_pe_import_lookup_table(
+            bytes,
+            header,
+            sections,
+            &library,
+            u64::from(lookup_table_rva),
+            u64::from(first_thunk),
+        )?);
+
+        descriptor_offset = checked_add_offset(
+            descriptor_offset,
+            PE_IMPORT_DESCRIPTOR_SIZE,
+            "PE import descriptor table",
+        )?;
+    }
+
+    Err(malformed(
+        "PE import descriptor table is missing terminator",
+    ))
+}
+
+fn parse_pe_import_lookup_table(
+    bytes: &[u8],
+    header: &PeHeader,
+    sections: &[PeSection],
+    library: &str,
+    lookup_table_rva: u64,
+    first_thunk: u64,
+) -> Result<Vec<Import>> {
+    let (entry_size, ordinal_flag) = match header.kind {
+        PeKind::Pe32 => (PE32_IMPORT_LOOKUP_ENTRY_SIZE, PE32_ORDINAL_FLAG),
+        PeKind::Pe32Plus => (PE32_PLUS_IMPORT_LOOKUP_ENTRY_SIZE, PE32_PLUS_ORDINAL_FLAG),
+    };
+    let table_location = pe_rva_to_file_location(lookup_table_rva, sections)
+        .ok_or_else(|| malformed("PE import lookup table RVA does not map to file data"))?;
+
+    let mut imports = Vec::new();
+    let mut entry_offset = table_location.offset;
+    let mut index = 0_u64;
+    while checked_add_offset(entry_offset, entry_size, "PE import lookup entry")?
+        <= table_location.limit
+    {
+        let value = match header.kind {
+            PeKind::Pe32 => u64::from(read_u32(
+                bytes,
+                entry_offset,
+                Endian::Little,
+                "PE32 import lookup entry",
+            )?),
+            PeKind::Pe32Plus => read_u64(
+                bytes,
+                entry_offset,
+                Endian::Little,
+                "PE32+ import lookup entry",
+            )?,
+        };
+        if value == 0 {
+            return Ok(imports);
+        }
+
+        let (name, ordinal) = if value & ordinal_flag != 0 {
+            (None, Some((value & 0xffff) as u16))
+        } else {
+            (Some(read_pe_import_name(bytes, sections, value)?), None)
+        };
+        imports.push(Import {
+            library: library.to_string(),
+            name,
+            ordinal,
+            thunk: pe_import_thunk_address(
+                header,
+                first_thunk,
+                lookup_table_rva,
+                index,
+                entry_size,
+            )?,
+        });
+
+        entry_offset = checked_add_offset(entry_offset, entry_size, "PE import lookup table")?;
+        index = index
+            .checked_add(1)
+            .ok_or_else(|| malformed("PE import lookup table index overflow"))?;
+    }
+
+    Err(malformed("PE import lookup table is missing terminator"))
+}
+
+fn pe_import_thunk_address(
+    header: &PeHeader,
+    first_thunk: u64,
+    lookup_table_rva: u64,
+    index: u64,
+    entry_size: u64,
+) -> Result<Option<Address>> {
+    let thunk_table_rva = if first_thunk == 0 {
+        lookup_table_rva
+    } else {
+        first_thunk
+    };
+    let entry_delta = index
+        .checked_mul(entry_size)
+        .ok_or_else(|| malformed("PE import thunk address overflow"))?;
+    let thunk_rva = thunk_table_rva
+        .checked_add(entry_delta)
+        .ok_or_else(|| malformed("PE import thunk address overflow"))?;
+    let address = header
+        .image_base
+        .checked_add(thunk_rva)
+        .ok_or_else(|| malformed("PE import thunk address overflow"))?;
+
+    Ok(Some(Address::new(address)))
+}
+
+fn read_pe_import_name(bytes: &[u8], sections: &[PeSection], name_rva: u64) -> Result<String> {
+    let location = pe_rva_to_file_location(name_rva, sections)
+        .ok_or_else(|| malformed("PE import name RVA does not map to file data"))?;
+    checked_range(bytes, location.offset, 2, "PE import hint")?;
+    read_file_c_string(
+        bytes,
+        checked_add_offset(location.offset, 2, "PE import name")?,
+        location.limit,
+        "PE import name",
+    )
+}
+
+fn read_pe_c_string(
+    bytes: &[u8],
+    sections: &[PeSection],
+    rva: u64,
+    context: &str,
+) -> Result<String> {
+    let location = pe_rva_to_file_location(rva, sections)
+        .ok_or_else(|| malformed(format!("{context} RVA does not map to file data")))?;
+    read_file_c_string(bytes, location.offset, location.limit, context)
+}
+
+fn read_file_c_string(bytes: &[u8], offset: u64, limit: u64, context: &str) -> Result<String> {
+    let start = usize::try_from(offset)
+        .map_err(|_| malformed(format!("{context} offset does not fit in usize")))?;
+    let end = usize::try_from(limit)
+        .map_err(|_| malformed(format!("{context} limit does not fit in usize")))?;
+    if end > bytes.len() {
+        return Err(malformed(format!("{context} limit extends beyond file")));
+    }
+    if start >= end {
+        return Err(malformed(format!(
+            "{context} offset is outside mapped file data"
+        )));
+    }
+
+    let rest = &bytes[start..end];
+    let Some(nul_offset) = rest.iter().position(|byte| *byte == 0) else {
+        return Err(malformed(format!("{context} is not null terminated")));
+    };
+    let name_bytes = &rest[..nul_offset];
+    if name_bytes.is_empty() {
+        return Err(malformed(format!("{context} is empty")));
+    }
+
+    Ok(String::from_utf8_lossy(name_bytes).into_owned())
+}
+
+fn pe_rva_to_file_location(rva: u64, sections: &[PeSection]) -> Option<PeFileLocation> {
+    for section in sections {
+        let file_offset = section.file_offset?;
+        if section.raw_size == 0 {
+            continue;
+        }
+        let section_start = section.virtual_address;
+        let section_end = section_start.checked_add(section.raw_size)?;
+        if rva < section_start || rva >= section_end {
+            continue;
+        }
+
+        let relative = rva.checked_sub(section_start)?;
+        let offset = file_offset.checked_add(relative)?;
+        let limit = file_offset.checked_add(section.raw_size)?;
+        return Some(PeFileLocation { offset, limit });
+    }
+
+    None
 }
 
 fn parse_elf_header(bytes: &[u8]) -> Result<ElfHeader> {
@@ -1687,6 +2071,7 @@ mod tests {
         assert_eq!(binary.sections[0].name, ".text");
         assert_eq!(binary.sections[0].address, Address::new(0x140001000));
         assert!(binary.sections[0].permissions.execute);
+        assert!(binary.imports.is_empty());
         assert_eq!(binary.memory_map.regions().len(), 2);
 
         let text = &binary.memory_map.regions()[0];
@@ -1710,6 +2095,27 @@ mod tests {
                 .translate_virtual_to_file_offset(Address::new(0x140001003)),
             Some(0x203)
         );
+    }
+
+    #[test]
+    fn loads_pe32_plus_imports_by_name_and_ordinal() {
+        let bytes = synthetic_pe32_plus_with_imports();
+        let binary = load_bytes(PathBuf::from("sample.exe"), &bytes).expect("load PE");
+
+        assert_eq!(binary.format, BinaryFormat::Pe);
+        assert_eq!(binary.imports.len(), 2);
+        assert_eq!(binary.imports[0].library, "KERNEL32.dll");
+        assert_eq!(binary.imports[0].name.as_deref(), Some("ExitProcess"));
+        assert_eq!(binary.imports[0].ordinal, None);
+        assert_eq!(binary.imports[0].thunk, Some(Address::new(0x1400020a0)));
+        assert_eq!(binary.imports[1].library, "KERNEL32.dll");
+        assert_eq!(binary.imports[1].name, None);
+        assert_eq!(binary.imports[1].ordinal, Some(7));
+        assert_eq!(binary.imports[1].thunk, Some(Address::new(0x1400020a8)));
+        assert!(binary.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Note
+                && diagnostic.message.contains("symbols and relocations")
+        }));
     }
 
     #[test]
@@ -1931,6 +2337,42 @@ mod tests {
         assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
     }
 
+    #[test]
+    fn pe_import_directory_outside_file_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus_with_imports();
+        let import_directory = pe32_plus_import_directory_offset();
+        write_u32_le(&mut bytes, import_directory, 0x5000);
+
+        let error = load_bytes(PathBuf::from("bad.exe"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn pe_import_descriptor_missing_terminator_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus_with_imports();
+        let import_directory_size = pe32_plus_import_directory_offset() + 4;
+        write_u32_le(
+            &mut bytes,
+            import_directory_size,
+            PE_IMPORT_DESCRIPTOR_SIZE as u32,
+        );
+
+        let error = load_bytes(PathBuf::from("bad.exe"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn pe_import_name_outside_file_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus_with_imports();
+        write_u64_le(&mut bytes, 0x480, 0x5000);
+
+        let error = load_bytes(PathBuf::from("bad.exe"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
     fn synthetic_pe32_plus() -> Vec<u8> {
         let mut bytes = vec![0_u8; 0x800];
         bytes[0] = b'M';
@@ -1977,6 +2419,74 @@ mod tests {
         bytes[0x400..0x404].copy_from_slice(&[1, 2, 3, 4]);
 
         bytes
+    }
+
+    fn synthetic_pe32_plus_with_imports() -> Vec<u8> {
+        let mut bytes = vec![0_u8; 0x800];
+        bytes[0] = b'M';
+        bytes[1] = b'Z';
+        write_u32_le(&mut bytes, 0x3c, 0x100);
+        bytes[0x100..0x104].copy_from_slice(PE_SIGNATURE);
+
+        let coff = 0x104;
+        write_u16_le(&mut bytes, coff, IMAGE_FILE_MACHINE_AMD64);
+        write_u16_le(&mut bytes, coff + 2, 2);
+        write_u16_le(&mut bytes, coff + 16, 0x90);
+
+        let optional = coff + 20;
+        write_u16_le(&mut bytes, optional, PE32_PLUS_MAGIC);
+        write_u32_le(&mut bytes, optional + 16, 0x1000);
+        write_u64_le(&mut bytes, optional + 24, 0x140000000);
+        write_u32_le(&mut bytes, optional + 108, 16);
+        let import_directory = pe32_plus_import_directory_offset();
+        write_u32_le(&mut bytes, import_directory, 0x2000);
+        write_u32_le(&mut bytes, import_directory + 4, 0x40);
+
+        write_pe_section(
+            &mut bytes,
+            0x1a8,
+            PeSectionSpec {
+                name: b".text\0\0\0",
+                virtual_size: 0x100,
+                virtual_address: 0x1000,
+                raw_size: 0x200,
+                raw_offset: 0x200,
+                characteristics: IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE,
+            },
+        );
+        write_pe_section(
+            &mut bytes,
+            0x1d0,
+            PeSectionSpec {
+                name: b".rdata\0\0",
+                virtual_size: 0x200,
+                virtual_address: 0x2000,
+                raw_size: 0x200,
+                raw_offset: 0x400,
+                characteristics: IMAGE_SCN_MEM_READ,
+            },
+        );
+
+        bytes[0x200..0x204].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
+
+        write_u32_le(&mut bytes, 0x400, 0x2080);
+        write_u32_le(&mut bytes, 0x40c, 0x2060);
+        write_u32_le(&mut bytes, 0x410, 0x20a0);
+
+        bytes[0x460..0x46d].copy_from_slice(b"KERNEL32.dll\0");
+        write_u64_le(&mut bytes, 0x480, 0x20c0);
+        write_u64_le(&mut bytes, 0x488, PE32_PLUS_ORDINAL_FLAG | 7);
+        write_u64_le(&mut bytes, 0x490, 0);
+        write_u16_le(&mut bytes, 0x4c0, 0);
+        bytes[0x4c2..0x4ce].copy_from_slice(b"ExitProcess\0");
+
+        bytes
+    }
+
+    fn pe32_plus_import_directory_offset() -> usize {
+        0x118
+            + PE32_PLUS_DATA_DIRECTORY_OFFSET as usize
+            + (PE_IMPORT_DIRECTORY_INDEX as usize * PE_DATA_DIRECTORY_SIZE as usize)
     }
 
     fn synthetic_mach_o64_le() -> Vec<u8> {

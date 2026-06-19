@@ -709,6 +709,7 @@ mod tests {
             },
             sections: Vec::new(),
             symbols: Vec::new(),
+            imports: Vec::new(),
             diagnostics: Vec::new(),
         };
 
@@ -899,6 +900,7 @@ mod tests {
             memory_map,
             sections: Vec::new(),
             symbols: Vec::new(),
+            imports: Vec::new(),
             diagnostics: Vec::new(),
         }
     }

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use kaiju_core::{Address, DiagnosticSeverity};
-use kaiju_loader::{LoadedBinary, Symbol};
+use kaiju_loader::{Import, LoadedBinary, Symbol};
 
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -15,6 +15,7 @@ pub struct Project {
     cfg_edges: BTreeSet<ProjectCfgEdge>,
     strings: Vec<ProjectString>,
     symbols: Vec<ProjectSymbol>,
+    imports: Vec<ProjectImport>,
     xrefs: BTreeSet<CrossReference>,
     analysis_facts: Vec<AnalysisFact>,
 }
@@ -23,6 +24,7 @@ impl Project {
     #[must_use]
     pub fn from_loaded_binary(binary: LoadedBinary) -> Self {
         let symbols = binary.symbols.iter().map(ProjectSymbol::from).collect();
+        let imports = binary.imports.iter().map(ProjectImport::from).collect();
 
         Self {
             binary,
@@ -33,6 +35,7 @@ impl Project {
             cfg_edges: BTreeSet::new(),
             strings: Vec::new(),
             symbols,
+            imports,
             xrefs: BTreeSet::new(),
             analysis_facts: Vec::new(),
         }
@@ -144,6 +147,25 @@ impl Project {
         &self.symbols
     }
 
+    pub fn add_import(&mut self, import: ProjectImport) {
+        if !self.imports.contains(&import) {
+            self.imports.push(import);
+            self.imports.sort_by_key(|entry| {
+                (
+                    entry.library.clone(),
+                    entry.name.clone(),
+                    entry.ordinal,
+                    entry.thunk,
+                )
+            });
+        }
+    }
+
+    #[must_use]
+    pub fn imports(&self) -> &[ProjectImport] {
+        &self.imports
+    }
+
     pub fn add_xref(&mut self, xref: CrossReference) {
         self.xrefs.insert(xref);
     }
@@ -209,6 +231,7 @@ impl Project {
             region_count: self.binary.memory_map.regions().len(),
             section_count: self.binary.sections.len(),
             symbol_count: self.symbols.len(),
+            import_count: self.imports.len(),
             diagnostic_count: self.binary.diagnostics.len(),
             string_count: self.strings.len(),
             function_count: self.functions.len(),
@@ -270,6 +293,7 @@ impl Project {
         push_json_usize_field(&mut json, 4, "regions", summary.region_count, true);
         push_json_usize_field(&mut json, 4, "sections", summary.section_count, true);
         push_json_usize_field(&mut json, 4, "symbols", summary.symbol_count, true);
+        push_json_usize_field(&mut json, 4, "imports", summary.import_count, true);
         push_json_usize_field(&mut json, 4, "diagnostics", summary.diagnostic_count, true);
         push_json_usize_field(&mut json, 4, "strings", summary.string_count, true);
         push_json_usize_field(&mut json, 4, "functions", summary.function_count, true);
@@ -290,6 +314,8 @@ impl Project {
         push_diagnostics_json(&mut json, self);
         json.push_str(",\n");
         push_symbols_json(&mut json, self);
+        json.push_str(",\n");
+        push_imports_json(&mut json, self);
         json.push_str(",\n");
         push_strings_json(&mut json, self);
         json.push_str(",\n");
@@ -313,6 +339,7 @@ pub struct ProjectSummary {
     pub region_count: usize,
     pub section_count: usize,
     pub symbol_count: usize,
+    pub import_count: usize,
     pub diagnostic_count: usize,
     pub string_count: usize,
     pub function_count: usize,
@@ -402,6 +429,25 @@ impl From<&Symbol> for ProjectSymbol {
         Self {
             name: symbol.name.clone(),
             address: symbol.address,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectImport {
+    pub library: String,
+    pub name: Option<String>,
+    pub ordinal: Option<u16>,
+    pub thunk: Option<Address>,
+}
+
+impl From<&Import> for ProjectImport {
+    fn from(import: &Import) -> Self {
+        Self {
+            library: import.library.clone(),
+            name: import.name.clone(),
+            ordinal: import.ordinal,
+            thunk: import.thunk,
         }
     }
 }
@@ -568,6 +614,34 @@ fn push_symbols_json(json: &mut String, project: &Project) {
     json.push_str("  ]");
 }
 
+fn push_imports_json(json: &mut String, project: &Project) {
+    json.push_str("  \"imports\": [");
+    if project.imports.is_empty() {
+        json.push(']');
+        return;
+    }
+    json.push('\n');
+    for (index, import) in project.imports.iter().enumerate() {
+        let comma = if index + 1 == project.imports.len() {
+            ""
+        } else {
+            ","
+        };
+        json.push_str("    {\n");
+        push_json_field(json, 6, "library", &import.library, true);
+        match &import.name {
+            Some(name) => push_json_field(json, 6, "name", name, true),
+            None => push_json_null_field(json, 6, "name", true),
+        }
+        push_json_optional_u16_field(json, 6, "ordinal", import.ordinal, true);
+        push_json_address_field(json, 6, "thunk", import.thunk, false);
+        json.push_str("    }");
+        json.push_str(comma);
+        json.push('\n');
+    }
+    json.push_str("  ]");
+}
+
 fn push_strings_json(json: &mut String, project: &Project) {
     json.push_str("  \"strings\": [");
     if project.strings.is_empty() {
@@ -690,6 +764,24 @@ fn push_json_usize_field(
     json.push_str(name);
     json.push_str("\": ");
     json.push_str(&value.to_string());
+    push_comma_newline(json, trailing_comma);
+}
+
+fn push_json_optional_u16_field(
+    json: &mut String,
+    indent: usize,
+    name: &str,
+    value: Option<u16>,
+    trailing_comma: bool,
+) {
+    push_indent(json, indent);
+    json.push('"');
+    json.push_str(name);
+    json.push_str("\": ");
+    match value {
+        Some(value) => json.push_str(&value.to_string()),
+        None => json.push_str("null"),
+    }
     push_comma_newline(json, trailing_comma);
 }
 
@@ -831,6 +923,39 @@ mod tests {
     }
 
     #[test]
+    fn creates_project_from_loaded_binary_and_preserves_imports() {
+        let mut binary = test_binary();
+        binary.imports.push(Import {
+            library: "KERNEL32.dll".to_string(),
+            name: Some("ExitProcess".to_string()),
+            ordinal: None,
+            thunk: Some(Address::new(0x1400020a0)),
+        });
+        binary.imports.push(Import {
+            library: "KERNEL32.dll".to_string(),
+            name: None,
+            ordinal: Some(7),
+            thunk: Some(Address::new(0x1400020a8)),
+        });
+
+        let project = Project::from_loaded_binary(binary);
+
+        assert_eq!(project.imports().len(), 2);
+        assert_eq!(project.imports()[0].library, "KERNEL32.dll");
+        assert_eq!(project.imports()[0].name.as_deref(), Some("ExitProcess"));
+        assert_eq!(project.imports()[0].ordinal, None);
+        assert_eq!(project.imports()[1].name, None);
+        assert_eq!(project.imports()[1].ordinal, Some(7));
+        let json = project.to_json_pretty();
+        assert!(json.contains("\"imports\": 2"));
+        assert!(json.contains("\"imports\": ["));
+        assert!(json.contains("\"library\": \"KERNEL32.dll\""));
+        assert!(json.contains("\"name\": \"ExitProcess\""));
+        assert!(json.contains("\"ordinal\": 7"));
+        assert!(json.contains("\"thunk\": \"0x00000001400020a8\""));
+    }
+
+    #[test]
     fn stores_labels_and_comments_by_address() {
         let mut project = Project::from_loaded_binary(test_binary());
 
@@ -928,6 +1053,7 @@ mod tests {
         assert_eq!(summary.format, "Raw");
         assert_eq!(summary.architecture, "x86_64");
         assert_eq!(summary.region_count, 1);
+        assert_eq!(summary.import_count, 0);
         assert_eq!(summary.diagnostic_count, 0);
         assert_eq!(summary.string_count, 1);
         assert_eq!(summary.function_count, 1);
@@ -1024,6 +1150,7 @@ mod tests {
             memory_map,
             sections: Vec::new(),
             symbols: Vec::new(),
+            imports: Vec::new(),
             diagnostics: Vec::new(),
         }
     }

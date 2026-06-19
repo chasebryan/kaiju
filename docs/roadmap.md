@@ -98,3 +98,8 @@ tests while keeping universal/fat binaries conservative.
 The ELF symbol slice added defensive `.symtab` / `.dynsym` extraction through
 linked string tables, malformed symbol-table tests, and CLI coverage for symbol
 counts without claiming imports or relocations.
+
+The PE import slice added bounded PE32/PE32+ import-directory parsing, named and
+ordinal import rows, malformed import-table tests, project export coverage, and
+a read-only `kaiju imports <file>` command without claiming PE exports or
+relocations.

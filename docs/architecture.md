@@ -35,13 +35,14 @@ address `0x0`.
 
 ELF has a limited defensive parser for class, endian, machine architecture,
 entrypoint, program headers, section headers, section names, `.symtab` /
-`.dynsym` symbol names, and `PT_LOAD` regions. PE has a limited defensive parser for PE32/PE32+, COFF machine,
-optional-header image base and entrypoint, section headers, section names, and
-section-backed memory regions. Mach-O has a limited thin parser for CPU/endian
+`.dynsym` symbol names, and `PT_LOAD` regions. PE has a limited defensive parser
+for PE32/PE32+, COFF machine, optional-header image base and entrypoint, section
+headers, section names, section-backed memory regions, and import tables. Mach-O
+has a limited thin parser for CPU/endian
 metadata, `LC_SEGMENT` / `LC_SEGMENT_64` memory maps, section metadata, and
 `LC_MAIN` entrypoint translation. Universal/fat Mach-O handling remains
-detection-only. Full parsing of symbols, relocations, imports, and
-format-specific edge cases is deferred.
+detection-only. Full parsing of relocations, exports, and format-specific edge
+cases is deferred.
 
 Loader diagnostics are attached to the normalized `LoadedBinary` model. They
 report conservative behavior such as raw fallback loading, limited Mach-O
@@ -124,6 +125,7 @@ Current project facts include:
 - CFG edges
 - extracted strings
 - normalized symbols copied from loader metadata
+- normalized imports copied from loader metadata
 - cross-references
 - small namespaced analysis facts
 
@@ -173,7 +175,7 @@ can move through these descriptors.
 The project crate can now produce a deterministic `kaiju.project.v1` JSON
 snapshot. The snapshot is derived output for headless automation and tests. It
 includes binary metadata, summary counts, discovered functions, block summaries,
-loader diagnostics, strings, xrefs, and analysis facts.
+loader diagnostics, symbols, imports, strings, xrefs, and analysis facts.
 
 This is not a full project database. Future `.kaiju` persistence should keep
 user annotations separate from regenerated analysis facts.

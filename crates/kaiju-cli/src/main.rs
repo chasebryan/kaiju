@@ -127,6 +127,12 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), CliError> {
             print_symbols(&binary);
             Ok(())
         }
+        "imports" => {
+            let path = read_single_path_arg(&mut args, "imports")?;
+            let binary = load_path(path)?;
+            print_imports(&binary);
+            Ok(())
+        }
         "xrefs" => {
             let path = read_single_path_arg(&mut args, "xrefs")?;
             let (project, _reports) = analyze_project(path)?;
@@ -458,6 +464,7 @@ fn print_usage() {
     eprintln!("  kaiju export <file>");
     eprintln!("  kaiju functions <file>");
     eprintln!("  kaiju symbols <file>");
+    eprintln!("  kaiju imports <file>");
     eprintln!("  kaiju xrefs <file>");
     eprintln!("  kaiju arch");
 }
@@ -476,6 +483,7 @@ fn print_info(binary: &LoadedBinary) {
     println!("Regions: {}", binary.memory_map.regions().len());
     println!("Sections: {}", binary.sections.len());
     println!("Symbols: {}", binary.symbols.len());
+    println!("Imports: {}", binary.imports.len());
 }
 
 fn print_map(binary: &LoadedBinary) {
@@ -513,6 +521,24 @@ fn print_symbols(binary: &LoadedBinary) {
             .address
             .map_or_else(|| "-".to_string(), |address| address.to_string());
         println!("{:<24} {}", symbol.name, address);
+    }
+}
+
+fn print_imports(binary: &LoadedBinary) {
+    println!("Library  Name  Ordinal  Thunk");
+    for import in &binary.imports {
+        let name = import.name.as_deref().unwrap_or("-");
+        let ordinal = import
+            .ordinal
+            .map_or_else(|| "-".to_string(), |ordinal| ordinal.to_string());
+        let thunk = import
+            .thunk
+            .map_or_else(|| "-".to_string(), |address| address.to_string());
+
+        println!(
+            "{:<20} {:<24} {:<8} {}",
+            import.library, name, ordinal, thunk
+        );
     }
 }
 
@@ -729,6 +755,7 @@ fn print_ir_function(function: &IrFunction) {
 fn print_analysis_summary(project: &Project, reports: &[AnalysisReport]) {
     println!("Path: {}", project.binary.path.display());
     println!("Passes: {}", reports.len());
+    println!("Imports: {}", project.imports().len());
     println!("Strings: {}", project.strings().len());
     println!("Functions: {}", project.functions().len());
     println!("Blocks: {}", project.basic_blocks().len());

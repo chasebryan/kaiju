@@ -34,20 +34,21 @@ ELF, PE, Mach-O, or unknown. Unknown files are loaded as raw bytes at virtual
 address `0x0`.
 
 ELF has a limited defensive parser for class, endian, machine architecture,
-entrypoint, program headers, section headers, section names, and `PT_LOAD`
-regions. PE has a limited defensive parser for PE32/PE32+, COFF machine,
+entrypoint, program headers, section headers, section names, `.symtab` /
+`.dynsym` symbol names, and `PT_LOAD` regions. PE has a limited defensive parser for PE32/PE32+, COFF machine,
 optional-header image base and entrypoint, section headers, section names, and
-section-backed memory regions. Mach-O is currently detection-only and is exposed
-as conservative file-backed bytes until a dedicated parser phase is implemented.
-Full parsing of symbols, relocations, imports, and format-specific edge cases is
-deferred.
+section-backed memory regions. Mach-O has a limited thin parser for CPU/endian
+metadata, `LC_SEGMENT` / `LC_SEGMENT_64` memory maps, section metadata, and
+`LC_MAIN` entrypoint translation. Universal/fat Mach-O handling remains
+detection-only. Full parsing of symbols, relocations, imports, and
+format-specific edge cases is deferred.
 
 Loader diagnostics are attached to the normalized `LoadedBinary` model. They
-report conservative behavior such as raw fallback loading, detection-only
-Mach-O handling, limited ELF/PE metadata parsing, and file-backed fallback
-mapping when a recognized container has no mappable regions. The
-`kaiju diagnostics <file>` command prints these facts separately from the
-stable `info` and `map` summaries.
+report conservative behavior such as raw fallback loading, limited Mach-O
+load-command parsing, universal/fat Mach-O fallback handling, limited ELF/PE
+metadata parsing, and file-backed fallback mapping when a recognized container
+has no mappable regions. The `kaiju diagnostics <file>` command prints these
+facts separately from the stable `info` and `map` summaries.
 
 ## Memory Model
 

@@ -100,16 +100,112 @@ pub fn load_bytes(path: PathBuf, bytes: &[u8]) -> Result<LoadedBinary> {
         BinaryFormat::Unknown | BinaryFormat::Raw => RawLoader::new().load(path, bytes),
         BinaryFormat::Elf => ElfLoader::new().load(path, bytes),
         BinaryFormat::Pe => PeLoader::new().load(path, bytes),
-        BinaryFormat::MachO => Ok(load_as_single_region(
-            path,
-            bytes,
-            BinaryFormat::MachO,
-            detected_endian(BinaryFormat::MachO, bytes),
-            "file",
-            vec![loader_warning(
-                "Mach-O parser is not implemented; loaded file as read-only bytes at virtual address 0x0",
-            )],
-        )),
+        BinaryFormat::MachO => MachOLoader::new().load(path, bytes),
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct MachOLoader;
+
+impl MachOLoader {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Loader for MachOLoader {
+    fn load(&self, path: PathBuf, bytes: &[u8]) -> Result<LoadedBinary> {
+        let Some(magic) = mach_o_magic(bytes) else {
+            return Err(malformed("input is not a Mach-O image"));
+        };
+
+        match magic {
+            MachOMagic::Fat { endian } => Ok(load_as_single_region(
+                path,
+                bytes,
+                BinaryFormat::MachO,
+                endian,
+                "macho-file",
+                vec![loader_warning(
+                    "Mach-O universal binary parsing is not implemented; loaded file as read-only bytes at virtual address 0x0",
+                )],
+            )),
+            MachOMagic::Thin { endian, is_64 } => {
+                let header = parse_mach_o_header(bytes, endian, is_64)?;
+                let commands = parse_mach_o_load_commands(bytes, &header)?;
+                let mut memory_map = MemoryMap::new();
+                let mut sections = Vec::new();
+                let mut diagnostics = vec![loader_note(
+                    "Mach-O loader uses limited load-command parsing; symbols, imports, and relocations are not yet populated",
+                )];
+
+                for segment in commands.segments {
+                    if segment.size == 0 {
+                        sections.extend(segment.sections);
+                        continue;
+                    }
+
+                    if segment.file_size > segment.size {
+                        return Err(malformed("Mach-O segment file size exceeds VM size"));
+                    }
+
+                    let initialized_bytes = match segment.file_offset {
+                        Some(offset) => {
+                            checked_range(bytes, offset, segment.file_size, "Mach-O segment data")?
+                                .to_vec()
+                        }
+                        None => Vec::new(),
+                    };
+                    let region = MemoryRegion::new_with_size(
+                        segment.name,
+                        segment.address,
+                        segment.file_offset,
+                        segment.size,
+                        segment.permissions,
+                        initialized_bytes,
+                    )?;
+                    memory_map.add_region(region);
+                    sections.extend(segment.sections);
+                }
+
+                if memory_map.regions().is_empty() {
+                    diagnostics.push(loader_warning(
+                        "Mach-O contained no mappable segments; loaded file as read-only bytes at virtual address 0x0",
+                    ));
+                    memory_map.add_region(MemoryRegion::new(
+                        "macho-file",
+                        Address::ZERO,
+                        Some(0),
+                        Permissions::read_only(),
+                        bytes.to_vec(),
+                    ));
+                }
+
+                let entrypoint = commands
+                    .entrypoint_file_offset
+                    .and_then(|file_offset| memory_map.translate_file_offset_to_virtual(file_offset));
+                if commands.entrypoint_file_offset.is_some() && entrypoint.is_none() {
+                    diagnostics.push(loader_warning(
+                        "Mach-O entrypoint file offset did not map to a virtual address",
+                    ));
+                }
+
+                Ok(LoadedBinary {
+                    path,
+                    file_size: bytes.len() as u64,
+                    bytes: bytes.to_vec(),
+                    format: BinaryFormat::MachO,
+                    endian,
+                    arch: header.arch,
+                    entrypoint,
+                    memory_map,
+                    sections,
+                    symbols: Vec::new(),
+                    diagnostics,
+                })
+            }
+        }
     }
 }
 
@@ -207,9 +303,10 @@ impl Loader for ElfLoader {
         let header = parse_elf_header(bytes)?;
         let program_headers = parse_elf_program_headers(bytes, &header)?;
         let sections = parse_elf_sections(bytes, &header)?;
+        let symbols = parse_elf_symbols(bytes, &header)?;
         let mut memory_map = MemoryMap::new();
         let mut diagnostics = vec![loader_note(
-            "ELF loader uses limited metadata parsing; symbols, relocations, and imports are not yet populated",
+            "ELF loader uses limited metadata parsing; imports and relocations are not yet populated",
         )];
 
         for (index, program_header) in program_headers
@@ -265,7 +362,7 @@ impl Loader for ElfLoader {
             entrypoint: Some(Address::new(header.entrypoint)),
             memory_map,
             sections,
-            symbols: Vec::new(),
+            symbols,
             diagnostics,
         })
     }
@@ -294,7 +391,11 @@ const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
 const ELFDATA2MSB: u8 = 2;
 const PT_LOAD: u32 = 1;
+const SHT_SYMTAB: u32 = 2;
+const SHT_STRTAB: u32 = 3;
 const SHT_NOBITS: u32 = 8;
+const SHT_DYNSYM: u32 = 11;
+const SHN_UNDEF: u16 = 0;
 const SHF_WRITE: u64 = 0x1;
 const SHF_ALLOC: u64 = 0x2;
 const SHF_EXECINSTR: u64 = 0x4;
@@ -313,6 +414,24 @@ const IMAGE_FILE_MACHINE_ARM64: u16 = 0xaa64;
 const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
 const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
+const MACHO32_HEADER_SIZE: u64 = 28;
+const MACHO64_HEADER_SIZE: u64 = 32;
+const MACHO32_SEGMENT_COMMAND_SIZE: u64 = 56;
+const MACHO64_SEGMENT_COMMAND_SIZE: u64 = 72;
+const MACHO32_SECTION_SIZE: u64 = 68;
+const MACHO64_SECTION_SIZE: u64 = 80;
+const LC_SEGMENT: u32 = 0x1;
+const LC_SEGMENT_64: u32 = 0x19;
+const LC_MAIN: u32 = 0x8000_0028;
+const CPU_TYPE_X86: u32 = 7;
+const CPU_TYPE_ARM: u32 = 12;
+const CPU_TYPE_X86_64: u32 = 0x0100_0007;
+const CPU_TYPE_ARM64: u32 = 0x0100_000c;
+const VM_PROT_READ: u32 = 0x1;
+const VM_PROT_WRITE: u32 = 0x2;
+const VM_PROT_EXECUTE: u32 = 0x4;
+const SECTION_TYPE_MASK: u32 = 0xff;
+const S_ZEROFILL: u32 = 0x1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ElfClass {
@@ -353,6 +472,8 @@ struct ElfSectionHeader {
     address: u64,
     offset: u64,
     size: u64,
+    link: u32,
+    entry_size: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -378,6 +499,39 @@ struct PeSection {
     size: u64,
     raw_size: u64,
     permissions: Permissions,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MachOMagic {
+    Thin { endian: Endian, is_64: bool },
+    Fat { endian: Endian },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MachOHeader {
+    arch: ArchitectureId,
+    command_count: u32,
+    command_offset: u64,
+    command_size: u64,
+    is_64: bool,
+    endian: Endian,
+}
+
+#[derive(Debug, Default)]
+struct MachOCommands {
+    segments: Vec<MachOSegment>,
+    entrypoint_file_offset: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct MachOSegment {
+    name: String,
+    address: Address,
+    file_offset: Option<u64>,
+    size: u64,
+    file_size: u64,
+    permissions: Permissions,
+    sections: Vec<Section>,
 }
 
 fn load_as_single_region(
@@ -418,6 +572,293 @@ fn loader_note(message: impl Into<String>) -> Diagnostic {
 
 fn loader_warning(message: impl Into<String>) -> Diagnostic {
     Diagnostic::new(DiagnosticSeverity::Warning, message)
+}
+
+fn parse_mach_o_header(bytes: &[u8], endian: Endian, is_64: bool) -> Result<MachOHeader> {
+    let header_size = if is_64 {
+        MACHO64_HEADER_SIZE
+    } else {
+        MACHO32_HEADER_SIZE
+    };
+    checked_range(bytes, 0, header_size, "Mach-O header")?;
+    let command_count = read_u32(bytes, 16, endian, "Mach-O ncmds")?;
+    let load_commands_size = u64::from(read_u32(bytes, 20, endian, "Mach-O sizeofcmds")?);
+    checked_range(
+        bytes,
+        header_size,
+        load_commands_size,
+        "Mach-O load commands",
+    )?;
+    let cpu_type = read_u32(bytes, 4, endian, "Mach-O CPU type")?;
+
+    Ok(MachOHeader {
+        arch: mach_o_cpu_type_to_arch(cpu_type),
+        command_count,
+        command_offset: header_size,
+        command_size: load_commands_size,
+        is_64,
+        endian,
+    })
+}
+
+fn parse_mach_o_load_commands(bytes: &[u8], header: &MachOHeader) -> Result<MachOCommands> {
+    let mut commands = MachOCommands::default();
+    let command_table_end = checked_add_offset(
+        header.command_offset,
+        header.command_size,
+        "Mach-O load command table",
+    )?;
+    let mut command_offset = header.command_offset;
+
+    for _ in 0..header.command_count {
+        checked_range(bytes, command_offset, 8, "Mach-O load command header")?;
+        let command = read_u32(bytes, command_offset, header.endian, "Mach-O load command")?;
+        let command_size = u64::from(read_u32(
+            bytes,
+            command_offset + 4,
+            header.endian,
+            "Mach-O load command size",
+        )?);
+        if command_size < 8 {
+            return Err(malformed("Mach-O load command size is too small"));
+        }
+        let command_end = checked_add_offset(command_offset, command_size, "Mach-O load command")?;
+        if command_end > command_table_end {
+            return Err(malformed(
+                "Mach-O load command extends beyond declared command table",
+            ));
+        }
+        checked_range(bytes, command_offset, command_size, "Mach-O load command")?;
+
+        match command {
+            LC_SEGMENT => {
+                commands.segments.push(parse_mach_o_segment32(
+                    bytes,
+                    command_offset,
+                    command_size,
+                    header.endian,
+                )?);
+            }
+            LC_SEGMENT_64 => {
+                commands.segments.push(parse_mach_o_segment64(
+                    bytes,
+                    command_offset,
+                    command_size,
+                    header.endian,
+                )?);
+            }
+            LC_MAIN if header.is_64 => {
+                if command_size < 24 {
+                    return Err(malformed("Mach-O LC_MAIN command is too small"));
+                }
+                commands.entrypoint_file_offset = Some(read_u64(
+                    bytes,
+                    command_offset + 8,
+                    header.endian,
+                    "Mach-O LC_MAIN entryoff",
+                )?);
+            }
+            _ => {}
+        }
+
+        command_offset = command_end;
+    }
+
+    if command_offset != command_table_end {
+        return Err(malformed(
+            "Mach-O load commands did not consume declared command table",
+        ));
+    }
+
+    Ok(commands)
+}
+
+fn parse_mach_o_segment32(
+    bytes: &[u8],
+    command_offset: u64,
+    command_size: u64,
+    endian: Endian,
+) -> Result<MachOSegment> {
+    if command_size < MACHO32_SEGMENT_COMMAND_SIZE {
+        return Err(malformed("Mach-O LC_SEGMENT command is too small"));
+    }
+
+    let segment_name = read_fixed_string(bytes, command_offset + 8, 16, "Mach-O segment name")?;
+    let address = u64::from(read_u32(
+        bytes,
+        command_offset + 24,
+        endian,
+        "Mach-O vmaddr",
+    )?);
+    let size = u64::from(read_u32(
+        bytes,
+        command_offset + 28,
+        endian,
+        "Mach-O vmsize",
+    )?);
+    let file_offset = u64::from(read_u32(
+        bytes,
+        command_offset + 32,
+        endian,
+        "Mach-O fileoff",
+    )?);
+    let file_size = u64::from(read_u32(
+        bytes,
+        command_offset + 36,
+        endian,
+        "Mach-O filesize",
+    )?);
+    let initprot = read_u32(bytes, command_offset + 44, endian, "Mach-O initprot")?;
+    let section_count = read_u32(bytes, command_offset + 48, endian, "Mach-O nsects")?;
+    let minimum_size = checked_table_size(
+        MACHO32_SEGMENT_COMMAND_SIZE,
+        MACHO32_SECTION_SIZE,
+        section_count,
+        "Mach-O LC_SEGMENT",
+    )?;
+    if command_size < minimum_size {
+        return Err(malformed("Mach-O LC_SEGMENT command is missing sections"));
+    }
+
+    let permissions = mach_o_permissions(initprot);
+    let sections = parse_mach_o_sections32(
+        bytes,
+        command_offset + MACHO32_SEGMENT_COMMAND_SIZE,
+        section_count,
+        endian,
+        permissions,
+    )?;
+
+    Ok(MachOSegment {
+        name: fallback_name(segment_name, "SEGMENT"),
+        address: Address::new(address),
+        file_offset: nonzero_file_offset(file_size, file_offset),
+        size,
+        file_size,
+        permissions,
+        sections,
+    })
+}
+
+fn parse_mach_o_segment64(
+    bytes: &[u8],
+    command_offset: u64,
+    command_size: u64,
+    endian: Endian,
+) -> Result<MachOSegment> {
+    if command_size < MACHO64_SEGMENT_COMMAND_SIZE {
+        return Err(malformed("Mach-O LC_SEGMENT_64 command is too small"));
+    }
+
+    let segment_name = read_fixed_string(bytes, command_offset + 8, 16, "Mach-O segment name")?;
+    let address = read_u64(bytes, command_offset + 24, endian, "Mach-O vmaddr")?;
+    let size = read_u64(bytes, command_offset + 32, endian, "Mach-O vmsize")?;
+    let file_offset = read_u64(bytes, command_offset + 40, endian, "Mach-O fileoff")?;
+    let file_size = read_u64(bytes, command_offset + 48, endian, "Mach-O filesize")?;
+    let initprot = read_u32(bytes, command_offset + 60, endian, "Mach-O initprot")?;
+    let section_count = read_u32(bytes, command_offset + 64, endian, "Mach-O nsects")?;
+    let minimum_size = checked_table_size(
+        MACHO64_SEGMENT_COMMAND_SIZE,
+        MACHO64_SECTION_SIZE,
+        section_count,
+        "Mach-O LC_SEGMENT_64",
+    )?;
+    if command_size < minimum_size {
+        return Err(malformed(
+            "Mach-O LC_SEGMENT_64 command is missing sections",
+        ));
+    }
+
+    let permissions = mach_o_permissions(initprot);
+    let sections = parse_mach_o_sections64(
+        bytes,
+        command_offset + MACHO64_SEGMENT_COMMAND_SIZE,
+        section_count,
+        endian,
+        permissions,
+    )?;
+
+    Ok(MachOSegment {
+        name: fallback_name(segment_name, "SEGMENT"),
+        address: Address::new(address),
+        file_offset: nonzero_file_offset(file_size, file_offset),
+        size,
+        file_size,
+        permissions,
+        sections,
+    })
+}
+
+fn parse_mach_o_sections32(
+    bytes: &[u8],
+    table_offset: u64,
+    section_count: u32,
+    endian: Endian,
+    permissions: Permissions,
+) -> Result<Vec<Section>> {
+    let mut sections = Vec::with_capacity(
+        usize::try_from(section_count)
+            .map_err(|_| malformed("Mach-O section count does not fit in usize"))?,
+    );
+    for index in 0..section_count {
+        let base = table_entry_offset_u32(
+            table_offset,
+            MACHO32_SECTION_SIZE,
+            index,
+            "Mach-O section table",
+        )?;
+        checked_range(bytes, base, MACHO32_SECTION_SIZE, "Mach-O section")?;
+        let name = read_fixed_string(bytes, base, 16, "Mach-O section name")?;
+        let address = u64::from(read_u32(bytes, base + 32, endian, "Mach-O section addr")?);
+        let size = u64::from(read_u32(bytes, base + 36, endian, "Mach-O section size")?);
+        let offset = u64::from(read_u32(bytes, base + 40, endian, "Mach-O section offset")?);
+        let flags = read_u32(bytes, base + 56, endian, "Mach-O section flags")?;
+        let file_offset = section_file_offset(bytes, offset, size, flags)?;
+        sections.push(Section {
+            name: fallback_name(name, "section"),
+            address: Address::new(address),
+            file_offset,
+            size,
+            permissions,
+        });
+    }
+    Ok(sections)
+}
+
+fn parse_mach_o_sections64(
+    bytes: &[u8],
+    table_offset: u64,
+    section_count: u32,
+    endian: Endian,
+    permissions: Permissions,
+) -> Result<Vec<Section>> {
+    let mut sections = Vec::with_capacity(
+        usize::try_from(section_count)
+            .map_err(|_| malformed("Mach-O section count does not fit in usize"))?,
+    );
+    for index in 0..section_count {
+        let base = table_entry_offset_u32(
+            table_offset,
+            MACHO64_SECTION_SIZE,
+            index,
+            "Mach-O section table",
+        )?;
+        checked_range(bytes, base, MACHO64_SECTION_SIZE, "Mach-O section")?;
+        let name = read_fixed_string(bytes, base, 16, "Mach-O section name")?;
+        let address = read_u64(bytes, base + 32, endian, "Mach-O section addr")?;
+        let size = read_u64(bytes, base + 40, endian, "Mach-O section size")?;
+        let offset = u64::from(read_u32(bytes, base + 48, endian, "Mach-O section offset")?);
+        let flags = read_u32(bytes, base + 64, endian, "Mach-O section flags")?;
+        let file_offset = section_file_offset(bytes, offset, size, flags)?;
+        sections.push(Section {
+            name: fallback_name(name, "section"),
+            address: Address::new(address),
+            file_offset,
+            size,
+            permissions,
+        });
+    }
+    Ok(sections)
 }
 
 fn parse_pe_header(bytes: &[u8]) -> Result<PeHeader> {
@@ -732,7 +1173,7 @@ fn parse_elf_program_headers(bytes: &[u8], header: &ElfHeader) -> Result<Vec<Elf
     Ok(program_headers)
 }
 
-fn parse_elf_sections(bytes: &[u8], header: &ElfHeader) -> Result<Vec<Section>> {
+fn parse_elf_section_headers(bytes: &[u8], header: &ElfHeader) -> Result<Vec<ElfSectionHeader>> {
     if header.section_header_count == 0 {
         return Ok(Vec::new());
     }
@@ -768,6 +1209,8 @@ fn parse_elf_sections(bytes: &[u8], header: &ElfHeader) -> Result<Vec<Section>> 
                 address: u64::from(read_u32(bytes, base + 12, header.endian, "ELF sh_addr")?),
                 offset: u64::from(read_u32(bytes, base + 16, header.endian, "ELF sh_offset")?),
                 size: u64::from(read_u32(bytes, base + 20, header.endian, "ELF sh_size")?),
+                link: read_u32(bytes, base + 24, header.endian, "ELF sh_link")?,
+                entry_size: u64::from(read_u32(bytes, base + 36, header.endian, "ELF sh_entsize")?),
             },
             ElfClass::Elf64 => ElfSectionHeader {
                 name_offset: read_u32(bytes, base, header.endian, "ELF sh_name")?,
@@ -776,11 +1219,18 @@ fn parse_elf_sections(bytes: &[u8], header: &ElfHeader) -> Result<Vec<Section>> 
                 address: read_u64(bytes, base + 16, header.endian, "ELF sh_addr")?,
                 offset: read_u64(bytes, base + 24, header.endian, "ELF sh_offset")?,
                 size: read_u64(bytes, base + 32, header.endian, "ELF sh_size")?,
+                link: read_u32(bytes, base + 40, header.endian, "ELF sh_link")?,
+                entry_size: read_u64(bytes, base + 56, header.endian, "ELF sh_entsize")?,
             },
         };
         raw_sections.push(section);
     }
 
+    Ok(raw_sections)
+}
+
+fn parse_elf_sections(bytes: &[u8], header: &ElfHeader) -> Result<Vec<Section>> {
+    let raw_sections = parse_elf_section_headers(bytes, header)?;
     let name_table = section_name_table(bytes, header, &raw_sections)?;
     let mut sections = Vec::with_capacity(raw_sections.len());
     for (index, section) in raw_sections.iter().enumerate() {
@@ -803,6 +1253,100 @@ fn parse_elf_sections(bytes: &[u8], header: &ElfHeader) -> Result<Vec<Section>> 
     }
 
     Ok(sections)
+}
+
+fn parse_elf_symbols(bytes: &[u8], header: &ElfHeader) -> Result<Vec<Symbol>> {
+    let raw_sections = parse_elf_section_headers(bytes, header)?;
+    let mut symbols = Vec::new();
+
+    for section in raw_sections
+        .iter()
+        .filter(|section| matches!(section.section_type, SHT_SYMTAB | SHT_DYNSYM))
+    {
+        if section.size == 0 {
+            continue;
+        }
+
+        let minimum_entry_size = match header.class {
+            ElfClass::Elf32 => 16,
+            ElfClass::Elf64 => 24,
+        };
+        if section.entry_size < minimum_entry_size {
+            return Err(malformed("ELF symbol table entry size is too small"));
+        }
+        if section.size % section.entry_size != 0 {
+            return Err(malformed(
+                "ELF symbol table size is not a multiple of entry size",
+            ));
+        }
+
+        let link_index = usize::try_from(section.link)
+            .map_err(|_| malformed("ELF symbol string table index does not fit in usize"))?;
+        let Some(string_section) = raw_sections.get(link_index) else {
+            return Err(malformed("ELF symbol string table index is out of range"));
+        };
+        if string_section.section_type != SHT_STRTAB {
+            return Err(malformed("ELF symbol table link does not point to STRTAB"));
+        }
+        if string_section.size == 0 {
+            continue;
+        }
+
+        let string_table = checked_range(
+            bytes,
+            string_section.offset,
+            string_section.size,
+            "ELF symbol string table",
+        )?;
+        checked_range(bytes, section.offset, section.size, "ELF symbol table")?;
+        let symbol_count = section.size / section.entry_size;
+        for index in 0..symbol_count {
+            let base = section
+                .offset
+                .checked_add(
+                    index
+                        .checked_mul(section.entry_size)
+                        .ok_or_else(|| malformed("ELF symbol table offset overflow"))?,
+                )
+                .ok_or_else(|| malformed("ELF symbol table offset overflow"))?;
+            if let Some(symbol) = parse_elf_symbol(bytes, header, string_table, base)? {
+                symbols.push(symbol);
+            }
+        }
+    }
+
+    Ok(symbols)
+}
+
+fn parse_elf_symbol(
+    bytes: &[u8],
+    header: &ElfHeader,
+    string_table: &[u8],
+    base: u64,
+) -> Result<Option<Symbol>> {
+    let (name_offset, section_index, value) = match header.class {
+        ElfClass::Elf32 => (
+            read_u32(bytes, base, header.endian, "ELF st_name")?,
+            read_u16(bytes, base + 14, header.endian, "ELF st_shndx")?,
+            u64::from(read_u32(bytes, base + 4, header.endian, "ELF st_value")?),
+        ),
+        ElfClass::Elf64 => (
+            read_u32(bytes, base, header.endian, "ELF st_name")?,
+            read_u16(bytes, base + 6, header.endian, "ELF st_shndx")?,
+            read_u64(bytes, base + 8, header.endian, "ELF st_value")?,
+        ),
+    };
+
+    let Some(name) = string_table_name(string_table, name_offset, "ELF symbol name")? else {
+        return Ok(None);
+    };
+    let address = if section_index == SHN_UNDEF || value == 0 {
+        None
+    } else {
+        Some(Address::new(value))
+    };
+
+    Ok(Some(Symbol { name, address }))
 }
 
 fn section_name_table<'a>(
@@ -843,6 +1387,30 @@ fn section_name(name_table: Option<&[u8]>, offset: u32) -> Option<String> {
     Some(String::from_utf8_lossy(bytes).into_owned())
 }
 
+fn string_table_name(table: &[u8], offset: u32, context: &str) -> Result<Option<String>> {
+    if offset == 0 {
+        return Ok(None);
+    }
+
+    let start = usize::try_from(offset)
+        .map_err(|_| malformed(format!("{context} offset does not fit in usize")))?;
+    let Some(rest) = table.get(start..) else {
+        return Err(malformed(format!("{context} offset is out of range")));
+    };
+    let end = rest
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(rest.len());
+    let Some(bytes) = rest.get(..end) else {
+        return Err(malformed(format!("{context} has invalid range")));
+    };
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
+}
+
 fn table_entry_offset(
     table_offset: u64,
     entry_size: u16,
@@ -855,6 +1423,29 @@ fn table_entry_offset(
     table_offset
         .checked_add(index_offset)
         .ok_or_else(|| malformed(format!("{context} offset overflow")))
+}
+
+fn table_entry_offset_u32(
+    table_offset: u64,
+    entry_size: u64,
+    index: u32,
+    context: &str,
+) -> Result<u64> {
+    let index_offset = entry_size
+        .checked_mul(u64::from(index))
+        .ok_or_else(|| malformed(format!("{context} offset overflow")))?;
+    table_offset
+        .checked_add(index_offset)
+        .ok_or_else(|| malformed(format!("{context} offset overflow")))
+}
+
+fn checked_table_size(header_size: u64, entry_size: u64, count: u32, context: &str) -> Result<u64> {
+    let entries_size = entry_size
+        .checked_mul(u64::from(count))
+        .ok_or_else(|| malformed(format!("{context} size overflow")))?;
+    header_size
+        .checked_add(entries_size)
+        .ok_or_else(|| malformed(format!("{context} size overflow")))
 }
 
 fn checked_add_offset(base: u64, addend: u64, context: &str) -> Result<u64> {
@@ -881,6 +1472,15 @@ fn byte_at(bytes: &[u8], offset: usize, context: &str) -> Result<u8> {
         .get(offset)
         .copied()
         .ok_or_else(|| malformed(format!("{context} is missing")))
+}
+
+fn read_fixed_string(bytes: &[u8], offset: u64, size: u64, context: &str) -> Result<String> {
+    let bytes = checked_range(bytes, offset, size, context)?;
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    Ok(String::from_utf8_lossy(&bytes[..end]).into_owned())
 }
 
 fn read_u16(bytes: &[u8], offset: u64, endian: Endian, context: &str) -> Result<u16> {
@@ -936,6 +1536,16 @@ fn pe_machine_to_arch(machine: u16) -> ArchitectureId {
     }
 }
 
+fn mach_o_cpu_type_to_arch(cpu_type: u32) -> ArchitectureId {
+    match cpu_type {
+        CPU_TYPE_X86 => ArchitectureId::X86,
+        CPU_TYPE_ARM => ArchitectureId::Arm,
+        CPU_TYPE_X86_64 => ArchitectureId::X86_64,
+        CPU_TYPE_ARM64 => ArchitectureId::Aarch64,
+        _ => ArchitectureId::Unknown,
+    }
+}
+
 fn segment_permissions(flags: u32) -> Permissions {
     Permissions::new(flags & PF_R != 0, flags & PF_W != 0, flags & PF_X != 0)
 }
@@ -954,6 +1564,39 @@ fn pe_section_permissions(characteristics: u32) -> Permissions {
         characteristics & IMAGE_SCN_MEM_WRITE != 0,
         characteristics & IMAGE_SCN_MEM_EXECUTE != 0,
     )
+}
+
+fn mach_o_permissions(initprot: u32) -> Permissions {
+    Permissions::new(
+        initprot & VM_PROT_READ != 0,
+        initprot & VM_PROT_WRITE != 0,
+        initprot & VM_PROT_EXECUTE != 0,
+    )
+}
+
+fn fallback_name(name: String, fallback: &str) -> String {
+    if name.is_empty() {
+        fallback.to_string()
+    } else {
+        name
+    }
+}
+
+fn nonzero_file_offset(file_size: u64, file_offset: u64) -> Option<u64> {
+    if file_size == 0 {
+        None
+    } else {
+        Some(file_offset)
+    }
+}
+
+fn section_file_offset(bytes: &[u8], offset: u64, size: u64, flags: u32) -> Result<Option<u64>> {
+    if size == 0 || flags & SECTION_TYPE_MASK == S_ZEROFILL {
+        return Ok(None);
+    }
+
+    checked_range(bytes, offset, size, "Mach-O section data")?;
+    Ok(Some(offset))
 }
 
 fn malformed(message: impl Into<String>) -> KaijuError {
@@ -980,31 +1623,34 @@ fn looks_like_pe(bytes: &[u8]) -> bool {
 }
 
 fn looks_like_mach_o(bytes: &[u8]) -> bool {
-    matches!(
-        bytes.get(0..4),
-        Some([0xfe, 0xed, 0xfa, 0xce])
-            | Some([0xce, 0xfa, 0xed, 0xfe])
-            | Some([0xfe, 0xed, 0xfa, 0xcf])
-            | Some([0xcf, 0xfa, 0xed, 0xfe])
-            | Some([0xca, 0xfe, 0xba, 0xbe])
-            | Some([0xbe, 0xba, 0xfe, 0xca])
-    )
+    mach_o_magic(bytes).is_some()
 }
 
-fn detected_endian(format: BinaryFormat, bytes: &[u8]) -> Endian {
-    match format {
-        BinaryFormat::Elf => match bytes.get(5) {
-            Some(1) => Endian::Little,
-            Some(2) => Endian::Big,
-            _ => Endian::Unknown,
-        },
-        BinaryFormat::Pe => Endian::Little,
-        BinaryFormat::MachO => match bytes.get(0..4) {
-            Some([0xfe, 0xed, 0xfa, 0xce]) | Some([0xfe, 0xed, 0xfa, 0xcf]) => Endian::Big,
-            Some([0xce, 0xfa, 0xed, 0xfe]) | Some([0xcf, 0xfa, 0xed, 0xfe]) => Endian::Little,
-            _ => Endian::Unknown,
-        },
-        BinaryFormat::Raw | BinaryFormat::Unknown => Endian::Unknown,
+fn mach_o_magic(bytes: &[u8]) -> Option<MachOMagic> {
+    match bytes.get(0..4) {
+        Some([0xfe, 0xed, 0xfa, 0xce]) => Some(MachOMagic::Thin {
+            endian: Endian::Big,
+            is_64: false,
+        }),
+        Some([0xce, 0xfa, 0xed, 0xfe]) => Some(MachOMagic::Thin {
+            endian: Endian::Little,
+            is_64: false,
+        }),
+        Some([0xfe, 0xed, 0xfa, 0xcf]) => Some(MachOMagic::Thin {
+            endian: Endian::Big,
+            is_64: true,
+        }),
+        Some([0xcf, 0xfa, 0xed, 0xfe]) => Some(MachOMagic::Thin {
+            endian: Endian::Little,
+            is_64: true,
+        }),
+        Some([0xca, 0xfe, 0xba, 0xbe]) => Some(MachOMagic::Fat {
+            endian: Endian::Big,
+        }),
+        Some([0xbe, 0xba, 0xfe, 0xca]) => Some(MachOMagic::Fat {
+            endian: Endian::Little,
+        }),
+        _ => None,
     }
 }
 
@@ -1075,18 +1721,60 @@ mod tests {
     }
 
     #[test]
-    fn mach_o_load_uses_detection_only_diagnostic() {
-        let bytes = [0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0];
+    fn loads_mach_o64_segment_sections_and_entrypoint() {
+        let bytes = synthetic_mach_o64_le();
         let binary = load_bytes(PathBuf::from("sample.macho"), &bytes).expect("load Mach-O");
 
         assert_eq!(binary.format, BinaryFormat::MachO);
+        assert_eq!(binary.arch, ArchitectureId::X86_64);
         assert_eq!(binary.endian, Endian::Little);
+        assert_eq!(binary.entrypoint, Some(Address::new(0x100000100)));
+        assert_eq!(binary.sections.len(), 1);
+        assert_eq!(binary.sections[0].name, "__text");
+        assert_eq!(binary.sections[0].address, Address::new(0x100000100));
+        assert_eq!(binary.sections[0].file_offset, Some(0x100));
+        assert_eq!(binary.sections[0].size, 4);
+        assert!(binary.sections[0].permissions.execute);
+        assert_eq!(binary.memory_map.regions().len(), 1);
+        let text = &binary.memory_map.regions()[0];
+        assert_eq!(text.name, "__TEXT");
+        assert_eq!(text.address, Address::new(0x100000000));
+        assert_eq!(text.file_offset, Some(0));
+        assert_eq!(text.size, 0x1000);
+        assert!(text.permissions.read);
+        assert!(text.permissions.execute);
+        assert!(!text.permissions.write);
+        assert_eq!(
+            binary
+                .memory_map
+                .read_range(Address::new(0x100000100), 4)
+                .expect("read text"),
+            vec![0x55, 0x48, 0x89, 0xe5]
+        );
+        assert_eq!(
+            binary
+                .memory_map
+                .translate_virtual_to_file_offset(Address::new(0x100000103)),
+            Some(0x103)
+        );
+        assert!(binary.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Note
+                && diagnostic.message.contains("limited load-command parsing")
+        }));
+    }
+
+    #[test]
+    fn mach_o_fat_load_uses_detection_only_diagnostic() {
+        let bytes = [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 0];
+        let binary = load_bytes(PathBuf::from("fat.macho"), &bytes).expect("load Mach-O");
+
+        assert_eq!(binary.format, BinaryFormat::MachO);
+        assert_eq!(binary.arch, ArchitectureId::Unknown);
+        assert_eq!(binary.endian, Endian::Big);
         assert_eq!(binary.memory_map.regions().len(), 1);
         assert!(binary.diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Warning
-                && diagnostic
-                    .message
-                    .contains("Mach-O parser is not implemented")
+                && diagnostic.message.contains("universal binary parsing")
         }));
     }
 
@@ -1123,16 +1811,21 @@ mod tests {
         assert_eq!(binary.arch, ArchitectureId::X86_64);
         assert_eq!(binary.endian, Endian::Little);
         assert_eq!(binary.entrypoint, Some(Address::new(0x401000)));
-        assert_eq!(binary.sections.len(), 3);
+        assert_eq!(binary.sections.len(), 5);
         assert_eq!(binary.sections[1].name, ".text");
         assert!(binary.sections[1].permissions.execute);
+        assert_eq!(binary.symbols.len(), 2);
+        assert_eq!(binary.symbols[0].name, "_start");
+        assert_eq!(binary.symbols[0].address, Some(Address::new(0x401000)));
+        assert_eq!(binary.symbols[1].name, "helper");
+        assert_eq!(binary.symbols[1].address, Some(Address::new(0x401004)));
         assert_eq!(binary.memory_map.regions().len(), 1);
 
         let region = &binary.memory_map.regions()[0];
         assert_eq!(region.name, "LOAD0");
         assert_eq!(region.address, Address::new(0x401000));
         assert_eq!(region.size, 8);
-        assert_eq!(region.file_offset, Some(0x200));
+        assert_eq!(region.file_offset, Some(0x300));
         assert!(region.permissions.read);
         assert!(region.permissions.execute);
         assert!(!region.permissions.write);
@@ -1147,7 +1840,7 @@ mod tests {
             binary
                 .memory_map
                 .translate_virtual_to_file_offset(Address::new(0x401003)),
-            Some(0x203)
+            Some(0x303)
         );
         assert_eq!(
             binary
@@ -1166,12 +1859,64 @@ mod tests {
     }
 
     #[test]
+    fn truncated_mach_o_returns_clean_error() {
+        let error = load_bytes(PathBuf::from("bad.macho"), &[0xcf, 0xfa, 0xed, 0xfe])
+            .expect_err("truncated Mach-O should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn mach_o_tiny_load_command_returns_clean_error() {
+        let mut bytes = synthetic_mach_o64_le();
+        write_u32_le(&mut bytes, MACHO64_HEADER_SIZE as usize + 4, 4);
+
+        let error =
+            load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn mach_o_segment_outside_file_returns_clean_error() {
+        let mut bytes = synthetic_mach_o64_le();
+        write_u64_le(&mut bytes, MACHO64_HEADER_SIZE as usize + 48, 0x400);
+
+        let error =
+            load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
     fn elf_segment_outside_file_returns_clean_error() {
         let mut bytes = synthetic_elf64_le();
         write_u64_le(&mut bytes, 0x40 + 32, 0x1000);
 
         let error =
             load_bytes(PathBuf::from("bad.elf"), &bytes).expect_err("bad segment should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn elf_symbol_table_bad_link_returns_clean_error() {
+        let mut bytes = synthetic_elf64_le();
+        write_u32_le(&mut bytes, 0x100 + 256 + 40, 99);
+
+        let error =
+            load_bytes(PathBuf::from("bad.elf"), &bytes).expect_err("bad symbols should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn elf_symbol_name_outside_string_table_returns_clean_error() {
+        let mut bytes = synthetic_elf64_le();
+        write_u32_le(&mut bytes, 0x380 + 24, 0xffff);
+
+        let error =
+            load_bytes(PathBuf::from("bad.elf"), &bytes).expect_err("bad symbols should fail");
 
         assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
     }
@@ -1234,8 +1979,55 @@ mod tests {
         bytes
     }
 
-    fn synthetic_elf64_le() -> Vec<u8> {
+    fn synthetic_mach_o64_le() -> Vec<u8> {
+        let segment_command_size = MACHO64_SEGMENT_COMMAND_SIZE + MACHO64_SECTION_SIZE;
+        let command_size = segment_command_size + 24;
         let mut bytes = vec![0_u8; 0x240];
+        bytes[0..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+        write_u32_le(&mut bytes, 4, CPU_TYPE_X86_64);
+        write_u32_le(&mut bytes, 8, 3);
+        write_u32_le(&mut bytes, 12, 2);
+        write_u32_le(&mut bytes, 16, 2);
+        write_u32_le(&mut bytes, 20, command_size as u32);
+        write_u32_le(&mut bytes, 24, 0);
+        write_u32_le(&mut bytes, 28, 0);
+
+        let segment = MACHO64_HEADER_SIZE as usize;
+        write_u32_le(&mut bytes, segment, LC_SEGMENT_64);
+        write_u32_le(&mut bytes, segment + 4, segment_command_size as u32);
+        bytes[segment + 8..segment + 24].copy_from_slice(b"__TEXT\0\0\0\0\0\0\0\0\0\0");
+        write_u64_le(&mut bytes, segment + 24, 0x100000000);
+        write_u64_le(&mut bytes, segment + 32, 0x1000);
+        write_u64_le(&mut bytes, segment + 40, 0);
+        write_u64_le(&mut bytes, segment + 48, 0x200);
+        write_u32_le(&mut bytes, segment + 56, VM_PROT_READ | VM_PROT_EXECUTE);
+        write_u32_le(&mut bytes, segment + 60, VM_PROT_READ | VM_PROT_EXECUTE);
+        write_u32_le(&mut bytes, segment + 64, 1);
+        write_u32_le(&mut bytes, segment + 68, 0);
+
+        let section = segment + MACHO64_SEGMENT_COMMAND_SIZE as usize;
+        bytes[section..section + 16].copy_from_slice(b"__text\0\0\0\0\0\0\0\0\0\0");
+        bytes[section + 16..section + 32].copy_from_slice(b"__TEXT\0\0\0\0\0\0\0\0\0\0");
+        write_u64_le(&mut bytes, section + 32, 0x100000100);
+        write_u64_le(&mut bytes, section + 40, 4);
+        write_u32_le(&mut bytes, section + 48, 0x100);
+        write_u32_le(&mut bytes, section + 52, 4);
+        write_u32_le(&mut bytes, section + 56, 0);
+        write_u32_le(&mut bytes, section + 60, 0);
+        write_u32_le(&mut bytes, section + 64, 0);
+
+        let entry = segment + segment_command_size as usize;
+        write_u32_le(&mut bytes, entry, LC_MAIN);
+        write_u32_le(&mut bytes, entry + 4, 24);
+        write_u64_le(&mut bytes, entry + 8, 0x100);
+        write_u64_le(&mut bytes, entry + 16, 0);
+
+        bytes[0x100..0x104].copy_from_slice(&[0x55, 0x48, 0x89, 0xe5]);
+        bytes
+    }
+
+    fn synthetic_elf64_le() -> Vec<u8> {
+        let mut bytes = vec![0_u8; 0x400];
         bytes[0..4].copy_from_slice(b"\x7fELF");
         bytes[4] = ELFCLASS64;
         bytes[5] = ELFDATA2LSB;
@@ -1251,12 +2043,12 @@ mod tests {
         write_u16_le(&mut bytes, 54, 56);
         write_u16_le(&mut bytes, 56, 1);
         write_u16_le(&mut bytes, 58, 64);
-        write_u16_le(&mut bytes, 60, 3);
+        write_u16_le(&mut bytes, 60, 5);
         write_u16_le(&mut bytes, 62, 2);
 
         write_u32_le(&mut bytes, 0x40, PT_LOAD);
         write_u32_le(&mut bytes, 0x40 + 4, PF_R | PF_X);
-        write_u64_le(&mut bytes, 0x40 + 8, 0x200);
+        write_u64_le(&mut bytes, 0x40 + 8, 0x300);
         write_u64_le(&mut bytes, 0x40 + 16, 0x401000);
         write_u64_le(&mut bytes, 0x40 + 32, 4);
         write_u64_le(&mut bytes, 0x40 + 40, 8);
@@ -1270,8 +2062,10 @@ mod tests {
                 section_type: 1,
                 flags: SHF_ALLOC | SHF_EXECINSTR,
                 address: 0x401000,
-                file_offset: 0x200,
+                file_offset: 0x300,
                 size: 4,
+                link: 0,
+                entry_size: 0,
             },
         );
         write_section64(
@@ -1279,16 +2073,49 @@ mod tests {
             0x100 + 128,
             Section64Spec {
                 name: 7,
-                section_type: 3,
+                section_type: SHT_STRTAB,
                 flags: 0,
                 address: 0,
-                file_offset: 0x220,
-                size: 17,
+                file_offset: 0x340,
+                size: 33,
+                link: 0,
+                entry_size: 0,
+            },
+        );
+        write_section64(
+            &mut bytes,
+            0x100 + 192,
+            Section64Spec {
+                name: 17,
+                section_type: SHT_STRTAB,
+                flags: 0,
+                address: 0,
+                file_offset: 0x370,
+                size: 15,
+                link: 0,
+                entry_size: 0,
+            },
+        );
+        write_section64(
+            &mut bytes,
+            0x100 + 256,
+            Section64Spec {
+                name: 25,
+                section_type: SHT_SYMTAB,
+                flags: 0,
+                address: 0,
+                file_offset: 0x380,
+                size: 72,
+                link: 3,
+                entry_size: 24,
             },
         );
 
-        bytes[0x200..0x204].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
-        bytes[0x220..0x231].copy_from_slice(b"\0.text\0.shstrtab\0");
+        bytes[0x300..0x304].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
+        bytes[0x340..0x361].copy_from_slice(b"\0.text\0.shstrtab\0.strtab\0.symtab\0");
+        bytes[0x370..0x37f].copy_from_slice(b"\0_start\0helper\0");
+        write_elf64_symbol(&mut bytes, 0x380 + 24, 1, 0x12, 1, 0x401000, 4);
+        write_elf64_symbol(&mut bytes, 0x380 + 48, 8, 0x12, 1, 0x401004, 0);
 
         bytes
     }
@@ -1300,6 +2127,8 @@ mod tests {
         address: u64,
         file_offset: u64,
         size: u64,
+        link: u32,
+        entry_size: u64,
     }
 
     fn write_section64(bytes: &mut [u8], offset: usize, spec: Section64Spec) {
@@ -1309,6 +2138,24 @@ mod tests {
         write_u64_le(bytes, offset + 16, spec.address);
         write_u64_le(bytes, offset + 24, spec.file_offset);
         write_u64_le(bytes, offset + 32, spec.size);
+        write_u32_le(bytes, offset + 40, spec.link);
+        write_u64_le(bytes, offset + 56, spec.entry_size);
+    }
+
+    fn write_elf64_symbol(
+        bytes: &mut [u8],
+        offset: usize,
+        name: u32,
+        info: u8,
+        section_index: u16,
+        value: u64,
+        size: u64,
+    ) {
+        write_u32_le(bytes, offset, name);
+        bytes[offset + 4] = info;
+        write_u16_le(bytes, offset + 6, section_index);
+        write_u64_le(bytes, offset + 8, value);
+        write_u64_le(bytes, offset + 16, size);
     }
 
     struct PeSectionSpec {

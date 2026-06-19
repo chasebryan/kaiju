@@ -21,8 +21,10 @@ what works:
 
 - raw loading
 - ELF / PE / Mach-O sniffing
-- limited ELF and PE metadata
+- limited ELF, PE, and Mach-O metadata
 - memory maps
+- Mach-O segment maps
+- ELF symbol tables
 - strings
 - loader diagnostics
 - small x86-64 disassembly
@@ -36,6 +38,7 @@ cargo test --workspace
 cargo run -p kaiju-cli -- info tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- map tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- diagnostics tests/fixtures/raw.bin
+cargo run -p kaiju-cli -- symbols tests/fixtures/raw.bin
 ```
 
 not yet:

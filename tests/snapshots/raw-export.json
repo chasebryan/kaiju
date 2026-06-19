@@ -27,6 +27,7 @@
       "message": "unknown format loaded as raw bytes at virtual address 0x0"
     }
   ],
+  "symbols": [],
   "strings": [
     {
       "file_offset": 0,

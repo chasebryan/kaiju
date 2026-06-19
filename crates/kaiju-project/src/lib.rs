@@ -289,6 +289,8 @@ impl Project {
         json.push_str(",\n");
         push_diagnostics_json(&mut json, self);
         json.push_str(",\n");
+        push_symbols_json(&mut json, self);
+        json.push_str(",\n");
         push_strings_json(&mut json, self);
         json.push_str(",\n");
         push_xrefs_json(&mut json, self);
@@ -536,6 +538,29 @@ fn push_diagnostics_json(json: &mut String, project: &Project) {
             true,
         );
         push_json_field(json, 6, "message", &diagnostic.message, false);
+        json.push_str("    }");
+        json.push_str(comma);
+        json.push('\n');
+    }
+    json.push_str("  ]");
+}
+
+fn push_symbols_json(json: &mut String, project: &Project) {
+    json.push_str("  \"symbols\": [");
+    if project.symbols.is_empty() {
+        json.push(']');
+        return;
+    }
+    json.push('\n');
+    for (index, symbol) in project.symbols.iter().enumerate() {
+        let comma = if index + 1 == project.symbols.len() {
+            ""
+        } else {
+            ","
+        };
+        json.push_str("    {\n");
+        push_json_field(json, 6, "name", &symbol.name, true);
+        push_json_address_field(json, 6, "address", symbol.address, false);
         json.push_str("    }");
         json.push_str(comma);
         json.push('\n');
@@ -799,6 +824,10 @@ mod tests {
         assert_eq!(project.symbols().len(), 1);
         assert_eq!(project.symbols()[0].name, "entry");
         assert_eq!(project.symbols()[0].address, Some(Address::new(0x1000)));
+        let json = project.to_json_pretty();
+        assert!(json.contains("\"symbols\": ["));
+        assert!(json.contains("\"name\": \"entry\""));
+        assert!(json.contains("\"address\": \"0x0000000000001000\""));
     }
 
     #[test]

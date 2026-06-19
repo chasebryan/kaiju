@@ -89,3 +89,12 @@ The snapshot-testing slice added exact raw-fixture CLI snapshots under
 The loader diagnostics slice added normalized diagnostics on `LoadedBinary` and
 a read-only `kaiju diagnostics <file>` command. This keeps conservative loader
 behavior visible without changing the stable `info` or `map` summaries.
+
+The Mach-O loader slice replaced magic-only handling for thin Mach-O files with
+limited CPU/endian metadata parsing, `LC_SEGMENT` / `LC_SEGMENT_64` memory maps,
+section metadata, `LC_MAIN` entrypoint translation, and malformed command/segment
+tests while keeping universal/fat binaries conservative.
+
+The ELF symbol slice added defensive `.symtab` / `.dynsym` extraction through
+linked string tables, malformed symbol-table tests, and CLI coverage for symbol
+counts without claiming imports or relocations.

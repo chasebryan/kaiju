@@ -15,6 +15,7 @@ The command loads a binary, runs the default analysis passes, and prints a
 - binary metadata
 - summary counts
 - loader diagnostics
+- loader symbols
 - discovered functions
 - basic block summaries
 - extracted strings

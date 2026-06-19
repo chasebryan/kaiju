@@ -86,6 +86,7 @@ fn cli_reports_elf_metadata_and_load_map() {
     assert!(stdout.contains("Endian: Little"));
     assert!(stdout.contains("Entrypoint: 0x0000000000401000"));
     assert!(stdout.contains("Regions: 1"));
+    assert!(stdout.contains("Symbols: 1"));
 
     let map = Command::new(env!("CARGO_BIN_EXE_kaiju"))
         .arg("map")
@@ -129,6 +130,47 @@ fn cli_reports_pe_metadata_and_section_map() {
     assert!(stdout.contains(".text"));
     assert!(stdout.contains("0x0000000140001000"));
     assert!(stdout.contains("r-x"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn cli_reports_mach_o_metadata_and_diagnostic() {
+    let path = write_temp_mach_o_fixture();
+
+    let info = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("info")
+        .arg(&path)
+        .output()
+        .expect("run kaiju info on Mach-O");
+    assert!(info.status.success());
+    let stdout = String::from_utf8(info.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Format: Mach-O"));
+    assert!(stdout.contains("Architecture: x86_64"));
+    assert!(stdout.contains("Endian: Little"));
+    assert!(stdout.contains("Entrypoint: 0x0000000100000100"));
+    assert!(stdout.contains("Regions: 1"));
+
+    let map = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("map")
+        .arg(&path)
+        .output()
+        .expect("run kaiju map on Mach-O");
+    assert!(map.status.success());
+    let stdout = String::from_utf8(map.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("__TEXT"));
+    assert!(stdout.contains("0x0000000100000000"));
+    assert!(stdout.contains("r-x"));
+
+    let diagnostics = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("diagnostics")
+        .arg(&path)
+        .output()
+        .expect("run kaiju diagnostics on Mach-O");
+    assert!(diagnostics.status.success());
+    let stdout = String::from_utf8(diagnostics.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Note"));
+    assert!(stdout.contains("limited load-command parsing"));
 
     let _ = fs::remove_file(path);
 }
@@ -357,6 +399,25 @@ fn cli_functions_reports_discovered_entrypoint_function() {
 }
 
 #[test]
+fn cli_symbols_reports_loader_symbols() {
+    let path = write_temp_elf_fixture();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("symbols")
+        .arg(&path)
+        .output()
+        .expect("run kaiju symbols");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Name  Address"));
+    assert!(stdout.contains("entry"));
+    assert!(stdout.contains("0x0000000000401000"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn cli_xrefs_reports_cfg_flow_edges() {
     let path = write_temp_cfg_elf_fixture();
 
@@ -441,6 +502,16 @@ fn write_temp_pe_fixture() -> PathBuf {
     path
 }
 
+fn write_temp_mach_o_fixture() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("kaiju-cli-macho-{}-{unique}.bin", process::id()));
+    fs::write(&path, synthetic_mach_o64_le()).expect("write Mach-O fixture");
+    path
+}
+
 fn write_temp_strings_fixture() -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -461,7 +532,7 @@ fn synthetic_cfg_elf64_le() -> Vec<u8> {
 }
 
 fn synthetic_elf64_le_with_code(code: &[u8]) -> Vec<u8> {
-    let mut bytes = vec![0_u8; 0x200 + code.len()];
+    let mut bytes = vec![0_u8; 0x400];
     bytes[0..4].copy_from_slice(b"\x7fELF");
     bytes[4] = 2;
     bytes[5] = 1;
@@ -472,24 +543,131 @@ fn synthetic_elf64_le_with_code(code: &[u8]) -> Vec<u8> {
     write_u32_le(&mut bytes, 20, 1);
     write_u64_le(&mut bytes, 24, 0x401000);
     write_u64_le(&mut bytes, 32, 0x40);
-    write_u64_le(&mut bytes, 40, 0);
+    write_u64_le(&mut bytes, 40, 0x100);
     write_u16_le(&mut bytes, 52, 64);
     write_u16_le(&mut bytes, 54, 56);
     write_u16_le(&mut bytes, 56, 1);
     write_u16_le(&mut bytes, 58, 64);
-    write_u16_le(&mut bytes, 60, 0);
-    write_u16_le(&mut bytes, 62, 0);
+    write_u16_le(&mut bytes, 60, 5);
+    write_u16_le(&mut bytes, 62, 2);
 
     write_u32_le(&mut bytes, 0x40, 1);
     write_u32_le(&mut bytes, 0x40 + 4, 5);
-    write_u64_le(&mut bytes, 0x40 + 8, 0x200);
+    write_u64_le(&mut bytes, 0x40 + 8, 0x300);
     write_u64_le(&mut bytes, 0x40 + 16, 0x401000);
     write_u64_le(&mut bytes, 0x40 + 32, code.len() as u64);
     write_u64_le(&mut bytes, 0x40 + 40, code.len() as u64);
     write_u64_le(&mut bytes, 0x40 + 48, 0x1000);
-    bytes[0x200..0x200 + code.len()].copy_from_slice(code);
+    bytes[0x300..0x300 + code.len()].copy_from_slice(code);
+
+    write_elf_section64(
+        &mut bytes,
+        0x100 + 64,
+        ElfSection64Spec {
+            name: 1,
+            section_type: 1,
+            flags: 0x6,
+            address: 0x401000,
+            file_offset: 0x300,
+            size: code.len() as u64,
+            link: 0,
+            entry_size: 0,
+        },
+    );
+    write_elf_section64(
+        &mut bytes,
+        0x100 + 128,
+        ElfSection64Spec {
+            name: 7,
+            section_type: 3,
+            flags: 0,
+            address: 0,
+            file_offset: 0x340,
+            size: 33,
+            link: 0,
+            entry_size: 0,
+        },
+    );
+    write_elf_section64(
+        &mut bytes,
+        0x100 + 192,
+        ElfSection64Spec {
+            name: 17,
+            section_type: 3,
+            flags: 0,
+            address: 0,
+            file_offset: 0x370,
+            size: 7,
+            link: 0,
+            entry_size: 0,
+        },
+    );
+    write_elf_section64(
+        &mut bytes,
+        0x100 + 256,
+        ElfSection64Spec {
+            name: 25,
+            section_type: 2,
+            flags: 0,
+            address: 0,
+            file_offset: 0x380,
+            size: 48,
+            link: 3,
+            entry_size: 24,
+        },
+    );
+
+    bytes[0x340..0x361].copy_from_slice(b"\0.text\0.shstrtab\0.strtab\0.symtab\0");
+    bytes[0x370..0x377].copy_from_slice(b"\0entry\0");
+    write_elf64_symbol(
+        &mut bytes,
+        0x380 + 24,
+        1,
+        0x12,
+        1,
+        0x401000,
+        code.len() as u64,
+    );
 
     bytes
+}
+
+struct ElfSection64Spec {
+    name: u32,
+    section_type: u32,
+    flags: u64,
+    address: u64,
+    file_offset: u64,
+    size: u64,
+    link: u32,
+    entry_size: u64,
+}
+
+fn write_elf_section64(bytes: &mut [u8], offset: usize, spec: ElfSection64Spec) {
+    write_u32_le(bytes, offset, spec.name);
+    write_u32_le(bytes, offset + 4, spec.section_type);
+    write_u64_le(bytes, offset + 8, spec.flags);
+    write_u64_le(bytes, offset + 16, spec.address);
+    write_u64_le(bytes, offset + 24, spec.file_offset);
+    write_u64_le(bytes, offset + 32, spec.size);
+    write_u32_le(bytes, offset + 40, spec.link);
+    write_u64_le(bytes, offset + 56, spec.entry_size);
+}
+
+fn write_elf64_symbol(
+    bytes: &mut [u8],
+    offset: usize,
+    name: u32,
+    info: u8,
+    section_index: u16,
+    value: u64,
+    size: u64,
+) {
+    write_u32_le(bytes, offset, name);
+    bytes[offset + 4] = info;
+    write_u16_le(bytes, offset + 6, section_index);
+    write_u64_le(bytes, offset + 8, value);
+    write_u64_le(bytes, offset + 16, size);
 }
 
 fn synthetic_pe32_plus() -> Vec<u8> {
@@ -518,6 +696,61 @@ fn synthetic_pe32_plus() -> Vec<u8> {
     write_u32_le(&mut bytes, section + 36, 0x6000_0000);
     bytes[0x200..0x204].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
 
+    bytes
+}
+
+fn synthetic_mach_o64_le() -> Vec<u8> {
+    const MACHO64_HEADER_SIZE: usize = 32;
+    const MACHO64_SEGMENT_COMMAND_SIZE: usize = 72;
+    const MACHO64_SECTION_SIZE: usize = 80;
+    const LC_SEGMENT_64: u32 = 0x19;
+    const LC_MAIN: u32 = 0x8000_0028;
+    const VM_PROT_READ: u32 = 0x1;
+    const VM_PROT_EXECUTE: u32 = 0x4;
+
+    let segment_command_size = MACHO64_SEGMENT_COMMAND_SIZE + MACHO64_SECTION_SIZE;
+    let command_size = segment_command_size + 24;
+    let mut bytes = vec![0_u8; 0x240];
+    bytes[0..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+    write_u32_le(&mut bytes, 4, 0x0100_0007);
+    write_u32_le(&mut bytes, 8, 3);
+    write_u32_le(&mut bytes, 12, 2);
+    write_u32_le(&mut bytes, 16, 2);
+    write_u32_le(&mut bytes, 20, command_size as u32);
+    write_u32_le(&mut bytes, 24, 0);
+    write_u32_le(&mut bytes, 28, 0);
+
+    let segment = MACHO64_HEADER_SIZE;
+    write_u32_le(&mut bytes, segment, LC_SEGMENT_64);
+    write_u32_le(&mut bytes, segment + 4, segment_command_size as u32);
+    bytes[segment + 8..segment + 24].copy_from_slice(b"__TEXT\0\0\0\0\0\0\0\0\0\0");
+    write_u64_le(&mut bytes, segment + 24, 0x100000000);
+    write_u64_le(&mut bytes, segment + 32, 0x1000);
+    write_u64_le(&mut bytes, segment + 40, 0);
+    write_u64_le(&mut bytes, segment + 48, 0x200);
+    write_u32_le(&mut bytes, segment + 56, VM_PROT_READ | VM_PROT_EXECUTE);
+    write_u32_le(&mut bytes, segment + 60, VM_PROT_READ | VM_PROT_EXECUTE);
+    write_u32_le(&mut bytes, segment + 64, 1);
+    write_u32_le(&mut bytes, segment + 68, 0);
+
+    let section = segment + MACHO64_SEGMENT_COMMAND_SIZE;
+    bytes[section..section + 16].copy_from_slice(b"__text\0\0\0\0\0\0\0\0\0\0");
+    bytes[section + 16..section + 32].copy_from_slice(b"__TEXT\0\0\0\0\0\0\0\0\0\0");
+    write_u64_le(&mut bytes, section + 32, 0x100000100);
+    write_u64_le(&mut bytes, section + 40, 4);
+    write_u32_le(&mut bytes, section + 48, 0x100);
+    write_u32_le(&mut bytes, section + 52, 4);
+    write_u32_le(&mut bytes, section + 56, 0);
+    write_u32_le(&mut bytes, section + 60, 0);
+    write_u32_le(&mut bytes, section + 64, 0);
+
+    let entry = segment + segment_command_size;
+    write_u32_le(&mut bytes, entry, LC_MAIN);
+    write_u32_le(&mut bytes, entry + 4, 24);
+    write_u64_le(&mut bytes, entry + 8, 0x100);
+    write_u64_le(&mut bytes, entry + 16, 0);
+
+    bytes[0x100..0x104].copy_from_slice(&[0x55, 0x48, 0x89, 0xe5]);
     bytes
 }
 

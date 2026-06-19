@@ -121,6 +121,12 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), CliError> {
             print_functions(&project);
             Ok(())
         }
+        "symbols" => {
+            let path = read_single_path_arg(&mut args, "symbols")?;
+            let binary = load_path(path)?;
+            print_symbols(&binary);
+            Ok(())
+        }
         "xrefs" => {
             let path = read_single_path_arg(&mut args, "xrefs")?;
             let (project, _reports) = analyze_project(path)?;
@@ -451,6 +457,7 @@ fn print_usage() {
     eprintln!("  kaiju analyze <file>");
     eprintln!("  kaiju export <file>");
     eprintln!("  kaiju functions <file>");
+    eprintln!("  kaiju symbols <file>");
     eprintln!("  kaiju xrefs <file>");
     eprintln!("  kaiju arch");
 }
@@ -496,6 +503,16 @@ fn print_diagnostics(binary: &LoadedBinary) {
             diagnostic_severity_name(diagnostic.severity),
             diagnostic.message
         );
+    }
+}
+
+fn print_symbols(binary: &LoadedBinary) {
+    println!("Name  Address");
+    for symbol in &binary.symbols {
+        let address = symbol
+            .address
+            .map_or_else(|| "-".to_string(), |address| address.to_string());
+        println!("{:<24} {}", symbol.name, address);
     }
 }
 

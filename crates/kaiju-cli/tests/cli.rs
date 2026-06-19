@@ -694,6 +694,72 @@ fn cli_save_refuses_non_empty_project_package_dir() {
 }
 
 #[test]
+fn cli_package_inspects_saved_project_package() {
+    let path = write_temp_elf_fixture();
+    let output_dir = temp_package_dir("package");
+
+    let save = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("save")
+        .arg(&path)
+        .arg("--out")
+        .arg(&output_dir)
+        .output()
+        .expect("run kaiju save");
+    assert!(save.status.success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("package")
+        .arg(&output_dir)
+        .output()
+        .expect("run kaiju package");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Schema: kaiju.package.v1"));
+    assert!(stdout.contains("ProjectSchema: kaiju.project.v1"));
+    assert!(stdout.contains("Format: ELF"));
+    assert!(stdout.contains("Architecture: x86_64"));
+    assert!(stdout.contains("Functions: 1"));
+    assert!(stdout.contains("Blocks: 1"));
+    assert!(stdout.contains("IRFunctions: 1"));
+    assert!(stdout.contains("- manifest.json ok"));
+    assert!(stdout.contains("- project.json ok"));
+    assert!(stdout.contains("- annotations.json ok"));
+
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
+fn cli_package_rejects_malformed_project_package() {
+    let output_dir = temp_package_dir("package-malformed");
+    fs::create_dir_all(&output_dir).expect("create package dir");
+    fs::write(output_dir.join("manifest.json"), "{\"schema\":\"wrong\"}").expect("write manifest");
+    fs::write(
+        output_dir.join("project.json"),
+        "{\"schema\":\"kaiju.project.v1\"}",
+    )
+    .expect("write project");
+    fs::write(
+        output_dir.join("annotations.json"),
+        "{\"schema\":\"kaiju.annotations.v1\"}",
+    )
+    .expect("write annotations");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("package")
+        .arg(&output_dir)
+        .output()
+        .expect("run kaiju package");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("manifest.json has schema=wrong"));
+
+    let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
 fn cli_functions_reports_discovered_entrypoint_function() {
     let path = write_temp_cfg_elf_fixture();
 

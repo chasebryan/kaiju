@@ -41,6 +41,8 @@ binaries. The default stance is defensive parsing.
 - Payload inspection stores bounded previews, not unbounded payload archives.
 - Project package writes create a new package directory or reuse an empty one
   and refuse non-empty output directories by default.
+- Project package inspection is read-only, path-scoped, bounded by per-file
+  size limits, and validates expected package schema markers.
 - Bounded ELF relocation table, linked symbol-table, entry-size, and
   symbol-index parsing tests.
 - Bounded PE import descriptor, thunk, DLL-name, and import-name parsing tests.
@@ -65,6 +67,8 @@ binaries. The default stance is defensive parsing.
   persistence behavior.
 - Keep project package writes explicit, path-scoped, and non-overwriting by
   default.
+- Keep project package inspection read-only and bounded by explicit package
+  file limits.
 
 ## Future Controls
 

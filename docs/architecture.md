@@ -221,6 +221,8 @@ derived IR summaries, loader diagnostics, dependencies, symbols, imports,
 exports, relocations, strings, xrefs, and analysis facts.
 
 The CLI can also write an initial `kaiju.package.v1` directory with a manifest,
-the deterministic project snapshot, and a separate empty annotations file. This
-is not a full editable project database. Future `.kaiju` persistence should keep
-user annotations separate from regenerated analysis facts.
+the deterministic project snapshot, and a separate empty annotations file, then
+inspect that package read-only by validating schema markers and printing summary
+counts. This is not a full editable project database. Future `.kaiju`
+persistence should keep user annotations separate from regenerated analysis
+facts.

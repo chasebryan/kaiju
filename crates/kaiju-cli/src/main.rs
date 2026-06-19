@@ -27,6 +27,7 @@ const DEFAULT_DISASM_COUNT: usize = 64;
 const DEFAULT_CFG_MAX_INSTRUCTIONS: usize = 256;
 const DEFAULT_CFG_MAX_BLOCKS: usize = 128;
 const MAX_X86_INSTRUCTION_BYTES: usize = 15;
+const MAX_PACKAGE_JSON_BYTES: u64 = 16 * 1024 * 1024;
 
 fn main() -> ExitCode {
     match run(env::args().skip(1)) {
@@ -127,6 +128,12 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), CliError> {
             let (project, _reports) = analyze_project(args.path)?;
             save_project_package(&project, &args.output_dir)?;
             print_saved_project_package(&args.output_dir);
+            Ok(())
+        }
+        "package" => {
+            let path = read_single_path_arg(&mut args, "package")?;
+            let inspection = inspect_project_package(&path)?;
+            print_project_package_inspection(&inspection);
             Ok(())
         }
         "functions" => {
@@ -822,6 +829,7 @@ fn print_usage() {
     eprintln!("  kaiju analyze <file>");
     eprintln!("  kaiju export <file>");
     eprintln!("  kaiju save <file> --out <project-dir>");
+    eprintln!("  kaiju package <project-dir>");
     eprintln!("  kaiju functions <file>");
     eprintln!("  kaiju ir <file>");
     eprintln!("  kaiju symbols <file>");
@@ -1296,6 +1304,202 @@ fn print_saved_project_package(output_dir: &Path) {
     println!("- annotations.json");
 }
 
+fn inspect_project_package(package_dir: &Path) -> KaijuResult<ProjectPackageInspection> {
+    if !package_dir.is_dir() {
+        return Err(KaijuError::new(
+            KaijuErrorKind::Io,
+            format!(
+                "project package is not a directory: {}",
+                package_dir.display()
+            ),
+        ));
+    }
+
+    let manifest = read_package_text_file(package_dir, "manifest.json")?;
+    let project = read_package_text_file(package_dir, "project.json")?;
+    let annotations = read_package_text_file(package_dir, "annotations.json")?;
+
+    require_json_string_field(&manifest, "schema", "kaiju.package.v1", "manifest.json")?;
+    require_json_string_field(
+        &manifest,
+        "project_schema",
+        "kaiju.project.v1",
+        "manifest.json",
+    )?;
+    require_json_string_field(&manifest, "project", "project.json", "manifest.json")?;
+    require_json_string_field(
+        &manifest,
+        "annotations",
+        "annotations.json",
+        "manifest.json",
+    )?;
+    require_json_string_field(&project, "schema", "kaiju.project.v1", "project.json")?;
+    require_json_string_field(
+        &annotations,
+        "schema",
+        "kaiju.annotations.v1",
+        "annotations.json",
+    )?;
+
+    Ok(ProjectPackageInspection {
+        directory: package_dir.to_path_buf(),
+        source_path: json_string_field(&manifest, "path").unwrap_or_else(|| "-".to_string()),
+        file_size: json_u64_field(&manifest, "file_size").unwrap_or(0),
+        format: json_string_field(&manifest, "format").unwrap_or_else(|| "-".to_string()),
+        architecture: json_string_field(&manifest, "architecture")
+            .unwrap_or_else(|| "-".to_string()),
+        endian: json_string_field(&manifest, "endian").unwrap_or_else(|| "-".to_string()),
+        functions: json_usize_field(&project, "functions").unwrap_or(0),
+        blocks: json_usize_field(&project, "blocks").unwrap_or(0),
+        ir_functions: json_usize_field(&project, "ir_functions").unwrap_or(0),
+        xrefs: json_usize_field(&project, "xrefs").unwrap_or(0),
+        analysis_facts: json_usize_field(&project, "analysis_facts").unwrap_or(0),
+    })
+}
+
+fn read_package_text_file(package_dir: &Path, name: &str) -> KaijuResult<String> {
+    let path = package_dir.join(name);
+    let metadata = fs::metadata(&path)?;
+    if !metadata.is_file() {
+        return Err(KaijuError::new(
+            KaijuErrorKind::Io,
+            format!(
+                "project package file is not a regular file: {}",
+                path.display()
+            ),
+        ));
+    }
+    if metadata.len() > MAX_PACKAGE_JSON_BYTES {
+        return Err(KaijuError::new(
+            KaijuErrorKind::AnalysisLimitExceeded,
+            format!(
+                "project package file is too large: {} has {} bytes, limit is {MAX_PACKAGE_JSON_BYTES}",
+                path.display(),
+                metadata.len()
+            ),
+        ));
+    }
+
+    Ok(fs::read_to_string(path)?)
+}
+
+fn require_json_string_field(
+    text: &str,
+    field: &str,
+    expected: &str,
+    file_name: &str,
+) -> KaijuResult<()> {
+    match json_string_field(text, field) {
+        Some(value) if value == expected => Ok(()),
+        Some(value) => Err(KaijuError::new(
+            KaijuErrorKind::MalformedBinary,
+            format!("{file_name} has {field}={value}, expected {expected}"),
+        )),
+        None => Err(KaijuError::new(
+            KaijuErrorKind::MalformedBinary,
+            format!("{file_name} is missing string field {field}"),
+        )),
+    }
+}
+
+fn json_string_field(text: &str, field: &str) -> Option<String> {
+    let key = format!("\"{}\"", json_string_inner(field));
+    let mut rest = text;
+    loop {
+        let key_index = rest.find(&key)?;
+        rest = &rest[key_index + key.len()..];
+        let after_colon = rest.trim_start().strip_prefix(':')?.trim_start();
+        if let Some(value) = parse_json_string_prefix(after_colon) {
+            return Some(value);
+        }
+    }
+}
+
+fn parse_json_string_prefix(text: &str) -> Option<String> {
+    let mut chars = text.chars();
+    if chars.next()? != '"' {
+        return None;
+    }
+
+    let mut value = String::new();
+    let mut escape = false;
+    while let Some(character) = chars.next() {
+        if escape {
+            match character {
+                '"' => value.push('"'),
+                '\\' => value.push('\\'),
+                '/' => value.push('/'),
+                'b' => value.push('\u{0008}'),
+                'f' => value.push('\u{000c}'),
+                'n' => value.push('\n'),
+                'r' => value.push('\r'),
+                't' => value.push('\t'),
+                'u' => {
+                    let mut digits = String::new();
+                    for _ in 0..4 {
+                        digits.push(chars.next()?);
+                    }
+                    let codepoint = u32::from_str_radix(&digits, 16).ok()?;
+                    value.push(char::from_u32(codepoint)?);
+                }
+                _ => return None,
+            }
+            escape = false;
+            continue;
+        }
+
+        match character {
+            '"' => return Some(value),
+            '\\' => escape = true,
+            _ => value.push(character),
+        }
+    }
+
+    None
+}
+
+fn json_usize_field(text: &str, field: &str) -> Option<usize> {
+    let value = json_u64_field(text, field)?;
+    usize::try_from(value).ok()
+}
+
+fn json_u64_field(text: &str, field: &str) -> Option<u64> {
+    let key = format!("\"{}\"", json_string_inner(field));
+    let mut rest = text;
+    loop {
+        let key_index = rest.find(&key)?;
+        rest = &rest[key_index + key.len()..];
+        let after_colon = rest.trim_start().strip_prefix(':')?.trim_start();
+        let digits = after_colon
+            .chars()
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<String>();
+        if !digits.is_empty() {
+            return digits.parse::<u64>().ok();
+        }
+    }
+}
+
+fn print_project_package_inspection(inspection: &ProjectPackageInspection) {
+    println!("Package: {}", inspection.directory.display());
+    println!("Schema: kaiju.package.v1");
+    println!("ProjectSchema: kaiju.project.v1");
+    println!("Source: {}", inspection.source_path);
+    println!("FileSize: {}", inspection.file_size);
+    println!("Format: {}", inspection.format);
+    println!("Architecture: {}", inspection.architecture);
+    println!("Endian: {}", inspection.endian);
+    println!("Functions: {}", inspection.functions);
+    println!("Blocks: {}", inspection.blocks);
+    println!("IRFunctions: {}", inspection.ir_functions);
+    println!("Xrefs: {}", inspection.xrefs);
+    println!("AnalysisFacts: {}", inspection.analysis_facts);
+    println!("Files:");
+    println!("- manifest.json ok");
+    println!("- project.json ok");
+    println!("- annotations.json ok");
+}
+
 fn run_network(command: NetworkCommand) -> KaijuResult<()> {
     match command {
         NetworkCommand::Evidence { path, format } => {
@@ -1555,6 +1759,13 @@ fn escape_string_value(value: &str) -> String {
 
 fn json_string(value: &str) -> String {
     let mut escaped = String::from("\"");
+    escaped.push_str(&json_string_inner(value));
+    escaped.push('"');
+    escaped
+}
+
+fn json_string_inner(value: &str) -> String {
+    let mut escaped = String::new();
     for character in value.chars() {
         match character {
             '"' => escaped.push_str("\\\""),
@@ -1568,7 +1779,6 @@ fn json_string(value: &str) -> String {
             character => escaped.push(character),
         }
     }
-    escaped.push('"');
     escaped
 }
 
@@ -1605,6 +1815,21 @@ struct LiftArgs {
 struct SaveArgs {
     path: PathBuf,
     output_dir: PathBuf,
+}
+
+#[derive(Debug)]
+struct ProjectPackageInspection {
+    directory: PathBuf,
+    source_path: String,
+    file_size: u64,
+    format: String,
+    architecture: String,
+    endian: String,
+    functions: usize,
+    blocks: usize,
+    ir_functions: usize,
+    xrefs: usize,
+    analysis_facts: usize,
 }
 
 #[derive(Debug)]

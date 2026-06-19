@@ -47,6 +47,7 @@ warnings about conservative or incomplete loader behavior.
 
 ```bash
 kaiju save <file> --out <project-dir>
+kaiju package <project-dir>
 ```
 
 The command loads a binary, runs the default analysis passes, and writes an
@@ -68,6 +69,11 @@ sample.kaiju/
   `kaiju export`.
 - `annotations.json` is an empty `kaiju.annotations.v1` file reserved for
   user-owned labels and comments.
+
+`kaiju package <project-dir>` is a read-only inspection command. It requires the
+three current package files, validates the package, project, and annotations
+schema markers, checks the manifest file names, and prints source/project
+summary counts. It does not rewrite package contents.
 
 ## Network Snapshots
 

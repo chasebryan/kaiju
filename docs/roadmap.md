@@ -186,3 +186,8 @@ writes an initial `kaiju.package.v1` directory containing a manifest, the
 deterministic project snapshot, and a separate empty annotations file. It
 refuses non-empty output directories so regenerated analysis cannot overwrite
 future user-owned annotations by accident.
+
+The package-inspection slice added `kaiju package <project-dir>`, a read-only
+validator for the initial package layout. It checks the required files, schema
+markers, manifest file names, and bounded file sizes, then prints source and
+project summary counts without rewriting the package.

@@ -29,6 +29,7 @@ dependencies = [
  "kaiju-disasm",
  "kaiju-ir",
  "kaiju-loader",
+ "kaiju-network",
  "kaiju-project",
 ]
 
@@ -69,6 +70,13 @@ dependencies = [
 
 [[package]]
 name = "kaiju-loader"
+version = "0.1.0"
+dependencies = [
+ "kaiju-core",
+]
+
+[[package]]
+name = "kaiju-network"
 version = "0.1.0"
 dependencies = [
  "kaiju-core",

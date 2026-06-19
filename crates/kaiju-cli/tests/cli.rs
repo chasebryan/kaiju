@@ -291,6 +291,45 @@ fn cli_reports_mach_o_metadata_and_diagnostic() {
 }
 
 #[test]
+fn cli_symbols_reports_mach_o_symbols() {
+    let path = write_temp_mach_o_symbol_fixture();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("symbols")
+        .arg(&path)
+        .output()
+        .expect("run kaiju symbols on Mach-O");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Name  Address"));
+    assert!(stdout.contains("_main"));
+    assert!(stdout.contains("0x0000000100000100"));
+    assert!(stdout.contains("_puts"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn cli_imports_reports_mach_o_imports() {
+    let path = write_temp_mach_o_symbol_fixture();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("imports")
+        .arg(&path)
+        .output()
+        .expect("run kaiju imports on Mach-O");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Library  Name  Ordinal  Thunk"));
+    assert!(stdout.contains("Mach-O"));
+    assert!(stdout.contains("_puts"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn cli_disasm_entry_reports_x86_64_instructions() {
     let path = write_temp_elf_fixture();
 
@@ -634,6 +673,60 @@ fn cli_arch_lists_builtin_architectures() {
 }
 
 #[test]
+fn cli_network_reports_offline_evidence_topology() {
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("network")
+        .arg(fixture_path("network-evidence.txt"))
+        .output()
+        .expect("run kaiju network");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Hosts: 7"));
+    assert!(stdout.contains("Services: 4"));
+    assert!(stdout.contains("Edges: 4"));
+    assert!(stdout.contains("Observations: 4"));
+    assert!(stdout.contains("IgnoredLines: 1"));
+    assert!(stdout.contains("workstation.local"));
+    assert!(stdout.contains("api.internal.example"));
+    assert!(stdout.contains("db.internal"));
+    assert!(stdout.contains("resolver.internal"));
+    assert!(stdout.contains("10.0.0.8"));
+    assert!(stdout.contains("https"));
+    assert!(stdout.contains("5432"));
+}
+
+#[test]
+fn cli_network_supports_json_and_dot_outputs() {
+    let json = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("network")
+        .arg(fixture_path("network-evidence.txt"))
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("run kaiju network json");
+
+    assert!(json.status.success());
+    let stdout = String::from_utf8(json.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("\"schema\": \"kaiju.network.v1\""));
+    assert!(stdout.contains("\"source\": \"workstation.local\""));
+    assert!(stdout.contains("\"destination\": \"api.internal.example\""));
+
+    let dot = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("network")
+        .arg(fixture_path("network-evidence.txt"))
+        .arg("--format")
+        .arg("dot")
+        .output()
+        .expect("run kaiju network dot");
+
+    assert!(dot.status.success());
+    let stdout = String::from_utf8(dot.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("digraph network"));
+    assert!(stdout.contains("\"workstation.local\" -> \"api.internal.example\""));
+}
+
+#[test]
 fn cli_raw_fixture_snapshots_match() {
     assert_raw_snapshot(&["info", RAW_FIXTURE_TOKEN], "raw-info.txt");
     assert_raw_snapshot(&["map", RAW_FIXTURE_TOKEN], "raw-map.txt");
@@ -762,6 +855,19 @@ fn write_temp_mach_o_fixture() -> PathBuf {
         .as_nanos();
     let path = std::env::temp_dir().join(format!("kaiju-cli-macho-{}-{unique}.bin", process::id()));
     fs::write(&path, synthetic_mach_o64_le()).expect("write Mach-O fixture");
+    path
+}
+
+fn write_temp_mach_o_symbol_fixture() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "kaiju-cli-macho-symbols-{}-{unique}.bin",
+        process::id()
+    ));
+    fs::write(&path, synthetic_mach_o64_le_with_symbols()).expect("write Mach-O symbol fixture");
     path
 }
 
@@ -1338,6 +1444,63 @@ fn synthetic_mach_o64_le() -> Vec<u8> {
 
     bytes[0x100..0x104].copy_from_slice(&[0x55, 0x48, 0x89, 0xe5]);
     bytes
+}
+
+fn synthetic_mach_o64_le_with_symbols() -> Vec<u8> {
+    const MACHO64_SEGMENT_COMMAND_SIZE: usize = 72;
+    const MACHO64_SECTION_SIZE: usize = 80;
+    const LC_SYMTAB: u32 = 0x2;
+    const N_STAB: u8 = 0xe0;
+    const N_TYPE_SECT: u8 = 0x0e;
+    const N_TYPE_UNDF: u8 = 0x00;
+    const N_EXT: u8 = 0x01;
+
+    let mut bytes = synthetic_mach_o64_le();
+    bytes.resize(0x300, 0);
+
+    let segment_command_size = MACHO64_SEGMENT_COMMAND_SIZE + MACHO64_SECTION_SIZE;
+    let command_size = segment_command_size + 24 + 24;
+    let symtab = mach_o64_symtab_command_offset();
+
+    write_u32_le(&mut bytes, 16, 3);
+    write_u32_le(&mut bytes, 20, command_size as u32);
+    write_u32_le(&mut bytes, symtab, LC_SYMTAB);
+    write_u32_le(&mut bytes, symtab + 4, 24);
+    write_u32_le(&mut bytes, symtab + 8, 0x240);
+    write_u32_le(&mut bytes, symtab + 12, 3);
+    write_u32_le(&mut bytes, symtab + 16, 0x280);
+    write_u32_le(&mut bytes, symtab + 20, 20);
+
+    write_mach_o64_symbol(&mut bytes, 0x240, 1, N_TYPE_SECT | N_EXT, 1, 0, 0x100000100);
+    write_mach_o64_symbol(&mut bytes, 0x250, 7, N_TYPE_UNDF | N_EXT, 0, 0, 0);
+    write_mach_o64_symbol(&mut bytes, 0x260, 13, N_STAB, 0, 0, 0);
+    bytes[0x280..0x294].copy_from_slice(b"\0_main\0_puts\0_debug\0");
+
+    bytes
+}
+
+fn mach_o64_symtab_command_offset() -> usize {
+    const MACHO64_HEADER_SIZE: usize = 32;
+    const MACHO64_SEGMENT_COMMAND_SIZE: usize = 72;
+    const MACHO64_SECTION_SIZE: usize = 80;
+
+    MACHO64_HEADER_SIZE + MACHO64_SEGMENT_COMMAND_SIZE + MACHO64_SECTION_SIZE + 24
+}
+
+fn write_mach_o64_symbol(
+    bytes: &mut [u8],
+    offset: usize,
+    name_offset: u32,
+    symbol_type: u8,
+    section_index: u8,
+    desc: u16,
+    value: u64,
+) {
+    write_u32_le(bytes, offset, name_offset);
+    bytes[offset + 4] = symbol_type;
+    bytes[offset + 5] = section_index;
+    write_u16_le(bytes, offset + 6, desc);
+    write_u64_le(bytes, offset + 8, value);
 }
 
 fn strings_fixture_bytes() -> Vec<u8> {

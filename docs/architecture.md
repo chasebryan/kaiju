@@ -20,6 +20,7 @@ construction, IR lifting, scripting, plugins, and a GUI.
   extraction for ASCII and UTF-16LE data.
 - `kaiju-disasm`: normalized disassembly traits and instruction data model. It
   currently includes a minimal x86-64 decoder subset.
+- `kaiju-network`: offline network evidence parsing and topology inference.
 - `kaiju-project`: in-memory project state that can hold a loaded binary and
   analysis facts.
 - `kaiju-cli`: headless command-line interface.
@@ -41,9 +42,10 @@ machine, optional-header image base and entrypoint, section headers, section
 names, section-backed memory regions, COFF symbol tables, import tables, export
 tables, and base relocation tables. Mach-O has a limited thin parser for
 CPU/endian metadata, `LC_SEGMENT` / `LC_SEGMENT_64` memory maps, section
-metadata, and `LC_MAIN` entrypoint translation. Universal/fat Mach-O handling
-remains detection-only. Full parsing of ELF dependency/version resolution,
-PE debug/PDB metadata, Mach-O relocations, and format-specific edge cases is
+metadata, `LC_MAIN` entrypoint translation, `LC_SYMTAB` symbols, and undefined
+external imports. Universal/fat Mach-O handling remains detection-only. Full
+parsing of ELF dependency/version resolution, PE debug/PDB metadata, Mach-O
+relocations and dynamic-loader metadata, and format-specific edge cases is
 deferred.
 
 Loader diagnostics are attached to the normalized `LoadedBinary` model. They
@@ -74,6 +76,18 @@ include file offset, encoding, character length, value, and a virtual address
 when the file offset belongs to an initialized mapped region. The current
 extractor supports printable ASCII and UTF-16LE strings with a configurable
 minimum character length.
+
+## Network Evidence Model
+
+The `kaiju-network` crate adds offline network reverse-engineering support. It
+loads user-supplied evidence text and infers hosts, destination services, and
+directed edges while preserving source line numbers. It recognizes directional
+observations, URL endpoints, and simple socket-pair lines.
+
+This is not active collection. The model does not open sockets, probe remote
+hosts, capture packets, or inspect payloads. `kaiju network <evidence-file>`
+prints text by default and can emit Graphviz DOT or deterministic
+`kaiju.network.v1` JSON for automation.
 
 ## Disassembly Model
 

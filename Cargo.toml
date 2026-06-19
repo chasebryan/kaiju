@@ -2,6 +2,7 @@
 members = [
     "crates/kaiju-core",
     "crates/kaiju-loader",
+    "crates/kaiju-network",
     "crates/kaiju-arch",
     "crates/kaiju-analysis",
     "crates/kaiju-disasm",

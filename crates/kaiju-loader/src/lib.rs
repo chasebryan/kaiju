@@ -164,7 +164,7 @@ impl Loader for MachOLoader {
                 let mut memory_map = MemoryMap::new();
                 let mut sections = Vec::new();
                 let mut diagnostics = vec![loader_note(
-                    "Mach-O loader uses limited load-command parsing; symbols, imports, and relocations are not yet populated",
+                    "Mach-O loader uses limited load-command parsing; relocations and dynamic loader metadata are not yet populated",
                 )];
 
                 for segment in commands.segments {
@@ -228,8 +228,8 @@ impl Loader for MachOLoader {
                     entrypoint,
                     memory_map,
                     sections,
-                    symbols: Vec::new(),
-                    imports: Vec::new(),
+                    symbols: commands.symbols,
+                    imports: commands.imports,
                     exports: Vec::new(),
                     relocations: Vec::new(),
                     diagnostics,
@@ -509,7 +509,10 @@ const MACHO32_SEGMENT_COMMAND_SIZE: u64 = 56;
 const MACHO64_SEGMENT_COMMAND_SIZE: u64 = 72;
 const MACHO32_SECTION_SIZE: u64 = 68;
 const MACHO64_SECTION_SIZE: u64 = 80;
+const MACHO32_SYMBOL_SIZE: u64 = 12;
+const MACHO64_SYMBOL_SIZE: u64 = 16;
 const LC_SEGMENT: u32 = 0x1;
+const LC_SYMTAB: u32 = 0x2;
 const LC_SEGMENT_64: u32 = 0x19;
 const LC_MAIN: u32 = 0x8000_0028;
 const CPU_TYPE_X86: u32 = 7;
@@ -521,6 +524,11 @@ const VM_PROT_WRITE: u32 = 0x2;
 const VM_PROT_EXECUTE: u32 = 0x4;
 const SECTION_TYPE_MASK: u32 = 0xff;
 const S_ZEROFILL: u32 = 0x1;
+const N_STAB: u8 = 0xe0;
+const N_TYPE: u8 = 0x0e;
+const N_EXT: u8 = 0x01;
+const N_UNDF: u8 = 0x00;
+const N_SECT: u8 = 0x0e;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ElfClass {
@@ -640,7 +648,15 @@ struct MachOHeader {
 #[derive(Debug, Default)]
 struct MachOCommands {
     segments: Vec<MachOSegment>,
+    symbols: Vec<Symbol>,
+    imports: Vec<Import>,
     entrypoint_file_offset: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct MachOSymbols {
+    symbols: Vec<Symbol>,
+    imports: Vec<Import>,
 }
 
 #[derive(Debug, Clone)]
@@ -781,6 +797,29 @@ fn parse_mach_o_load_commands(bytes: &[u8], header: &MachOHeader) -> Result<Mach
                     "Mach-O LC_MAIN entryoff",
                 )?);
             }
+            LC_SYMTAB => {
+                if command_size < 24 {
+                    return Err(malformed("Mach-O LC_SYMTAB command is too small"));
+                }
+                let symbol_offset =
+                    read_u32(bytes, command_offset + 8, header.endian, "Mach-O symoff")?;
+                let symbol_count =
+                    read_u32(bytes, command_offset + 12, header.endian, "Mach-O nsyms")?;
+                let string_offset =
+                    read_u32(bytes, command_offset + 16, header.endian, "Mach-O stroff")?;
+                let string_size =
+                    read_u32(bytes, command_offset + 20, header.endian, "Mach-O strsize")?;
+                let symbols = parse_mach_o_symbols(
+                    bytes,
+                    header,
+                    u64::from(symbol_offset),
+                    symbol_count,
+                    u64::from(string_offset),
+                    u64::from(string_size),
+                )?;
+                commands.imports.extend(symbols.imports);
+                commands.symbols.extend(symbols.symbols);
+            }
             _ => {}
         }
 
@@ -794,6 +833,95 @@ fn parse_mach_o_load_commands(bytes: &[u8], header: &MachOHeader) -> Result<Mach
     }
 
     Ok(commands)
+}
+
+fn parse_mach_o_symbols(
+    bytes: &[u8],
+    header: &MachOHeader,
+    symbol_offset: u64,
+    symbol_count: u32,
+    string_offset: u64,
+    string_size: u64,
+) -> Result<MachOSymbols> {
+    if symbol_count == 0 {
+        return Ok(MachOSymbols::default());
+    }
+
+    let entry_size = if header.is_64 {
+        MACHO64_SYMBOL_SIZE
+    } else {
+        MACHO32_SYMBOL_SIZE
+    };
+    let table_size = u64::from(symbol_count)
+        .checked_mul(entry_size)
+        .ok_or_else(|| malformed("Mach-O symbol table size overflow"))?;
+    checked_range(bytes, symbol_offset, table_size, "Mach-O symbol table")?;
+    let string_table = checked_range(bytes, string_offset, string_size, "Mach-O string table")?;
+
+    let mut symbols = MachOSymbols::default();
+    for index in 0..symbol_count {
+        let base = symbol_offset
+            .checked_add(
+                u64::from(index)
+                    .checked_mul(entry_size)
+                    .ok_or_else(|| malformed("Mach-O symbol table offset overflow"))?,
+            )
+            .ok_or_else(|| malformed("Mach-O symbol table offset overflow"))?;
+        let name_offset = read_u32(bytes, base, header.endian, "Mach-O n_strx")?;
+        let symbol_type = read_u8(bytes, base + 4, "Mach-O n_type")?;
+        let value = if header.is_64 {
+            read_u64(bytes, base + 8, header.endian, "Mach-O n_value")?
+        } else {
+            u64::from(read_u32(bytes, base + 8, header.endian, "Mach-O n_value")?)
+        };
+
+        if symbol_type & N_STAB != 0 {
+            continue;
+        }
+        let Some(name) = mach_o_string_table_name(string_table, name_offset)? else {
+            continue;
+        };
+        let symbol_kind = symbol_type & N_TYPE;
+        let address = if symbol_kind == N_SECT && value != 0 {
+            Some(Address::new(value))
+        } else {
+            None
+        };
+        if symbol_kind == N_UNDF && (symbol_type & N_EXT) != 0 {
+            symbols.imports.push(Import {
+                library: "Mach-O".to_string(),
+                name: Some(name.clone()),
+                ordinal: None,
+                thunk: None,
+            });
+        }
+        symbols.symbols.push(Symbol { name, address });
+    }
+
+    Ok(symbols)
+}
+
+fn mach_o_string_table_name(table: &[u8], offset: u32) -> Result<Option<String>> {
+    if offset == 0 {
+        return Ok(None);
+    }
+    let start = usize::try_from(offset)
+        .map_err(|_| malformed("Mach-O symbol name offset does not fit in usize"))?;
+    let Some(rest) = table.get(start..) else {
+        return Err(malformed("Mach-O symbol name offset is out of range"));
+    };
+    let end = rest
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(rest.len());
+    let Some(bytes) = rest.get(..end) else {
+        return Err(malformed("Mach-O symbol name has invalid range"));
+    };
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
 }
 
 fn parse_mach_o_segment32(
@@ -2748,6 +2876,10 @@ fn read_fixed_string(bytes: &[u8], offset: u64, size: u64, context: &str) -> Res
     Ok(String::from_utf8_lossy(&bytes[..end]).into_owned())
 }
 
+fn read_u8(bytes: &[u8], offset: u64, context: &str) -> Result<u8> {
+    Ok(checked_range(bytes, offset, 1, context)?[0])
+}
+
 fn read_u16(bytes: &[u8], offset: u64, endian: Endian, context: &str) -> Result<u16> {
     let bytes = checked_range(bytes, offset, 2, context)?;
     let array = <[u8; 2]>::try_from(bytes)
@@ -3107,10 +3239,30 @@ mod tests {
                 .translate_virtual_to_file_offset(Address::new(0x100000103)),
             Some(0x103)
         );
+        assert!(binary.symbols.is_empty());
+        assert!(binary.imports.is_empty());
         assert!(binary.diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Note
                 && diagnostic.message.contains("limited load-command parsing")
         }));
+    }
+
+    #[test]
+    fn loads_mach_o64_symbols_and_imports() {
+        let bytes = synthetic_mach_o64_le_with_symbols();
+        let binary = load_bytes(PathBuf::from("sample.macho"), &bytes).expect("load Mach-O");
+
+        assert_eq!(binary.format, BinaryFormat::MachO);
+        assert_eq!(binary.symbols.len(), 2);
+        assert_eq!(binary.symbols[0].name, "_main");
+        assert_eq!(binary.symbols[0].address, Some(Address::new(0x100000100)));
+        assert_eq!(binary.symbols[1].name, "_puts");
+        assert_eq!(binary.symbols[1].address, None);
+        assert_eq!(binary.imports.len(), 1);
+        assert_eq!(binary.imports[0].library, "Mach-O");
+        assert_eq!(binary.imports[0].name.as_deref(), Some("_puts"));
+        assert_eq!(binary.imports[0].ordinal, None);
+        assert_eq!(binary.imports[0].thunk, None);
     }
 
     #[test]
@@ -3245,6 +3397,41 @@ mod tests {
     fn mach_o_tiny_load_command_returns_clean_error() {
         let mut bytes = synthetic_mach_o64_le();
         write_u32_le(&mut bytes, MACHO64_HEADER_SIZE as usize + 4, 4);
+
+        let error =
+            load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn mach_o_tiny_symtab_command_returns_clean_error() {
+        let mut bytes = synthetic_mach_o64_le_with_symbols();
+        let symtab = mach_o64_symtab_command_offset();
+        write_u32_le(&mut bytes, symtab + 4, 16);
+
+        let error =
+            load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn mach_o_symbol_table_outside_file_returns_clean_error() {
+        let mut bytes = synthetic_mach_o64_le_with_symbols();
+        let symtab = mach_o64_symtab_command_offset();
+        write_u32_le(&mut bytes, symtab + 8, 0x1000);
+
+        let error =
+            load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn mach_o_symbol_name_outside_string_table_returns_clean_error() {
+        let mut bytes = synthetic_mach_o64_le_with_symbols();
+        write_u32_le(&mut bytes, 0x250, 0x400);
 
         let error =
             load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
@@ -3802,6 +3989,53 @@ mod tests {
 
         bytes[0x100..0x104].copy_from_slice(&[0x55, 0x48, 0x89, 0xe5]);
         bytes
+    }
+
+    fn synthetic_mach_o64_le_with_symbols() -> Vec<u8> {
+        let mut bytes = synthetic_mach_o64_le();
+        bytes.resize(0x300, 0);
+
+        let segment_command_size = MACHO64_SEGMENT_COMMAND_SIZE + MACHO64_SECTION_SIZE;
+        let command_size = segment_command_size + 24 + 24;
+        let symtab = mach_o64_symtab_command_offset();
+
+        write_u32_le(&mut bytes, 16, 3);
+        write_u32_le(&mut bytes, 20, command_size as u32);
+        write_u32_le(&mut bytes, symtab, LC_SYMTAB);
+        write_u32_le(&mut bytes, symtab + 4, 24);
+        write_u32_le(&mut bytes, symtab + 8, 0x240);
+        write_u32_le(&mut bytes, symtab + 12, 3);
+        write_u32_le(&mut bytes, symtab + 16, 0x280);
+        write_u32_le(&mut bytes, symtab + 20, 20);
+
+        write_mach_o64_symbol(&mut bytes, 0x240, 1, N_SECT | N_EXT, 1, 0, 0x100000100);
+        write_mach_o64_symbol(&mut bytes, 0x250, 7, N_UNDF | N_EXT, 0, 0, 0);
+        write_mach_o64_symbol(&mut bytes, 0x260, 13, N_STAB, 0, 0, 0);
+        bytes[0x280..0x294].copy_from_slice(b"\0_main\0_puts\0_debug\0");
+
+        bytes
+    }
+
+    fn mach_o64_symtab_command_offset() -> usize {
+        MACHO64_HEADER_SIZE as usize
+            + (MACHO64_SEGMENT_COMMAND_SIZE + MACHO64_SECTION_SIZE) as usize
+            + 24
+    }
+
+    fn write_mach_o64_symbol(
+        bytes: &mut [u8],
+        offset: usize,
+        name_offset: u32,
+        symbol_type: u8,
+        section_index: u8,
+        desc: u16,
+        value: u64,
+    ) {
+        write_u32_le(bytes, offset, name_offset);
+        bytes[offset + 4] = symbol_type;
+        bytes[offset + 5] = section_index;
+        write_u16_le(bytes, offset + 6, desc);
+        write_u64_le(bytes, offset + 8, value);
     }
 
     fn synthetic_elf64_le() -> Vec<u8> {

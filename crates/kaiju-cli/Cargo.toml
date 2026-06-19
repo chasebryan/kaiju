@@ -13,6 +13,7 @@ kaiju-core = { path = "../kaiju-core" }
 kaiju-disasm = { path = "../kaiju-disasm" }
 kaiju-ir = { path = "../kaiju-ir" }
 kaiju-loader = { path = "../kaiju-loader" }
+kaiju-network = { path = "../kaiju-network" }
 kaiju-project = { path = "../kaiju-project" }
 
 [[bin]]

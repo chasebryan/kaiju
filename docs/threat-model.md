@@ -9,6 +9,8 @@ binaries. The default stance is defensive parsing.
 - Analysis project integrity.
 - Trustworthy analysis output.
 - Availability of the headless CLI.
+- Clear separation between offline network evidence analysis and active
+  network collection.
 
 ## Input Risks
 
@@ -17,6 +19,7 @@ binaries. The default stance is defensive parsing.
 - Overlapping or contradictory regions.
 - Large allocation requests.
 - Invalid encodings.
+- Ambiguous, noisy, or misleading network evidence lines.
 - Future parser backend bugs.
 
 ## Current Controls
@@ -28,6 +31,10 @@ binaries. The default stance is defensive parsing.
 - Unit and integration tests for malformed-adjacent boundaries.
 - Deterministic loader hardening test over hostile magic headers and mutated
   byte inputs.
+- Offline network evidence parsing only; no socket access, packet capture,
+  payload inspection, or remote probing.
+- Network facts retain source line numbers and ignored-line counts so inferred
+  topology stays auditable.
 - Bounded ELF relocation table, linked symbol-table, entry-size, and
   symbol-index parsing tests.
 - Bounded PE import descriptor, thunk, DLL-name, and import-name parsing tests.
@@ -37,6 +44,8 @@ binaries. The default stance is defensive parsing.
   block-overrun parsing tests.
 - Bounded PE COFF symbol table, string-table name, section-index, and
   auxiliary-entry parsing tests.
+- Bounded Mach-O load-command, segment, symbol-table, and string-table parsing
+  tests.
 
 ## Required Rules
 
@@ -45,6 +54,8 @@ binaries. The default stance is defensive parsing.
 - Bounds-check all offsets before reading.
 - Use checked arithmetic for address and offset math.
 - Add malformed-input tests with every parser expansion.
+- Keep network reverse-engineering features evidence-file based unless a future
+  capability model explicitly authorizes active collection.
 
 ## Future Controls
 
@@ -57,3 +68,5 @@ binaries. The default stance is defensive parsing.
   capabilities.
 - Restricted scripting with no default filesystem, process, or network access.
 - Deterministic analysis mode for reproducible automation.
+- Structured importers for specific network log formats with preserved record
+  provenance.

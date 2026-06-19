@@ -130,3 +130,15 @@ The loader hardening gate slice added a dependency-free integration test over
 hostile magic headers and deterministic byte mutations, documented the direct
 `cargo test -p kaiju-loader --test hardening` gate, and made CI run that gate
 by name alongside the full workspace tests.
+
+The Mach-O symbol slice added bounded `LC_SYMTAB` parsing for nlist32/nlist64
+rows, string-table-backed symbol names, undefined external import rows,
+malformed symbol/string-table tests, and CLI coverage for Mach-O `symbols` and
+`imports` output without claiming relocations, dylib binding metadata, or
+universal/fat member selection.
+
+The offline network evidence slice added a dependency-free `kaiju-network`
+crate plus `kaiju network <evidence-file> [--format text|dot|json]` for
+inferring hosts, services, and directed edges from authorized evidence files.
+It deliberately avoids active probing, packet capture, payload inspection, and
+live socket access.

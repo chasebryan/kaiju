@@ -13,6 +13,7 @@ use kaiju_core::{Address, DiagnosticSeverity, KaijuError, KaijuErrorKind, Result
 use kaiju_disasm::{disassembler_for_architecture, Disassembler, Instruction};
 use kaiju_ir::{lift_instructions, IrFunction};
 use kaiju_loader::{load_path, LoadedBinary};
+use kaiju_network::{load_network_evidence, NetworkEdge, NetworkMap, NetworkProtocol};
 use kaiju_project::{CrossReferenceKind, Project};
 
 const DEFAULT_MIN_STRING_LEN: usize = 4;
@@ -149,6 +150,12 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), CliError> {
             let path = read_single_path_arg(&mut args, "xrefs")?;
             let (project, _reports) = analyze_project(path)?;
             print_xrefs(&project);
+            Ok(())
+        }
+        "network" => {
+            let args = read_network_args(&mut args)?;
+            let network = load_network_evidence(&args.path)?;
+            print_network(&network, args.format);
             Ok(())
         }
         "arch" => {
@@ -425,6 +432,38 @@ fn read_lift_args(args: &mut impl Iterator<Item = String>) -> Result<LiftArgs, C
     })
 }
 
+fn read_network_args(args: &mut impl Iterator<Item = String>) -> Result<NetworkArgs, CliError> {
+    let mut path = None;
+    let mut format = NetworkOutputFormat::Text;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--format" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage(
+                        "missing value for network --format".to_string(),
+                    ));
+                };
+                format = parse_network_format(&value)?;
+            }
+            _ if path.is_none() => path = Some(PathBuf::from(arg)),
+            _ => {
+                return Err(CliError::Usage(format!(
+                    "unexpected extra argument for network: {arg}"
+                )))
+            }
+        }
+    }
+
+    let Some(path) = path else {
+        return Err(CliError::Usage(
+            "missing evidence path for network".to_string(),
+        ));
+    };
+
+    Ok(NetworkArgs { path, format })
+}
+
 fn parse_address(value: &str) -> Result<Address, CliError> {
     let parsed = if let Some(hex) = value
         .strip_prefix("0x")
@@ -461,6 +500,17 @@ fn parse_cfg_format(value: &str) -> Result<CfgOutputFormat, CliError> {
     }
 }
 
+fn parse_network_format(value: &str) -> Result<NetworkOutputFormat, CliError> {
+    match value {
+        "text" => Ok(NetworkOutputFormat::Text),
+        "dot" => Ok(NetworkOutputFormat::Dot),
+        "json" => Ok(NetworkOutputFormat::Json),
+        _ => Err(CliError::Usage(format!(
+            "invalid network --format value: {value}"
+        ))),
+    }
+}
+
 fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  kaiju info <file>");
@@ -480,6 +530,7 @@ fn print_usage() {
     eprintln!("  kaiju exports <file>");
     eprintln!("  kaiju relocations <file>");
     eprintln!("  kaiju xrefs <file>");
+    eprintln!("  kaiju network <evidence-file> [--format text|dot|json]");
     eprintln!("  kaiju arch");
 }
 
@@ -858,6 +909,120 @@ fn print_architectures() {
     }
 }
 
+fn print_network(network: &NetworkMap, format: NetworkOutputFormat) {
+    match format {
+        NetworkOutputFormat::Text => print_network_text(network),
+        NetworkOutputFormat::Dot => print_network_dot(network),
+        NetworkOutputFormat::Json => println!("{}", network.to_json_pretty()),
+    }
+}
+
+fn print_network_text(network: &NetworkMap) {
+    let summary = network.summary();
+    println!("Source: {}", network.source_name());
+    println!("Hosts: {}", summary.hosts);
+    println!("Services: {}", summary.services);
+    println!("Edges: {}", summary.edges);
+    println!("Observations: {}", summary.observations);
+    println!("IgnoredLines: {}", summary.ignored_lines);
+
+    println!("Hosts:");
+    println!("Host  Kind  Observations  Lines");
+    for host in network.hosts() {
+        println!(
+            "{:<28} {:<10} {:<12} {}",
+            host.id,
+            host.kind,
+            host.observation_count(),
+            format_line_numbers(&host.observation_lines)
+        );
+    }
+
+    println!("Services:");
+    println!("Host  Port  Protocol  Observations  Lines");
+    for service in network.services() {
+        println!(
+            "{:<28} {:<6} {:<9} {:<12} {}",
+            service.host,
+            service.port,
+            format_protocol(service.protocol.as_ref()),
+            service.observation_count(),
+            format_line_numbers(&service.observation_lines)
+        );
+    }
+
+    println!("Edges:");
+    println!("Source  Destination  Protocol  Port  Observations  Lines");
+    for edge in network.edges() {
+        println!(
+            "{:<28} {:<28} {:<9} {:<6} {:<12} {}",
+            edge.source,
+            edge.destination,
+            format_protocol(edge.protocol.as_ref()),
+            format_optional_port(edge.port),
+            edge.observation_count(),
+            format_line_numbers(&edge.observation_lines)
+        );
+    }
+}
+
+fn print_network_dot(network: &NetworkMap) {
+    println!("digraph network {{");
+    println!(
+        "  label=\"network evidence {}\";",
+        dot_escape(network.source_name())
+    );
+    for host in network.hosts() {
+        println!(
+            "  \"{}\" [label=\"{}\\n{}\"];",
+            dot_escape(&host.id),
+            dot_escape(&host.id),
+            host.kind
+        );
+    }
+    for edge in network.edges() {
+        print_network_dot_edge(edge);
+    }
+    println!("}}");
+}
+
+fn print_network_dot_edge(edge: &NetworkEdge) {
+    println!(
+        "  \"{}\" -> \"{}\" [label=\"{}\"];",
+        dot_escape(&edge.source),
+        dot_escape(&edge.destination),
+        dot_escape(&network_edge_label(edge))
+    );
+}
+
+fn network_edge_label(edge: &NetworkEdge) -> String {
+    let mut parts = Vec::new();
+    if let Some(protocol) = &edge.protocol {
+        parts.push(protocol.to_string());
+    }
+    if let Some(port) = edge.port {
+        parts.push(port.to_string());
+    }
+    parts.push(format!("{} obs", edge.observation_count()));
+    parts.join("/")
+}
+
+fn format_protocol(protocol: Option<&NetworkProtocol>) -> String {
+    protocol.map_or_else(|| "-".to_string(), ToString::to_string)
+}
+
+fn format_optional_port(port: Option<u16>) -> String {
+    port.map_or_else(|| "-".to_string(), |port| port.to_string())
+}
+
+fn format_line_numbers(lines: &[usize]) -> String {
+    lines
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn xref_kind_name(kind: CrossReferenceKind) -> &'static str {
     match kind {
         CrossReferenceKind::Flow => "flow",
@@ -905,10 +1070,23 @@ struct LiftArgs {
     count: usize,
 }
 
+#[derive(Debug)]
+struct NetworkArgs {
+    path: PathBuf,
+    format: NetworkOutputFormat,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CfgOutputFormat {
     Text,
     Dot,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NetworkOutputFormat {
+    Text,
+    Dot,
+    Json,
 }
 
 #[derive(Debug, Clone, Copy)]

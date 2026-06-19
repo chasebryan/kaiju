@@ -33,6 +33,17 @@ under `summary.diagnostics`. Diagnostic rows include a normalized severity and
 message so headless automation can distinguish normal raw fallback notes from
 warnings about conservative or incomplete loader behavior.
 
+## Network Evidence Snapshot
+
+```bash
+kaiju network <evidence-file> --format json
+```
+
+This command prints a separate `kaiju.network.v1` JSON object for offline
+network evidence. It includes source name, summary counts, hosts, services,
+directed edges, observations, and source line numbers. It is deterministic
+derived output and does not represent a persisted project database.
+
 ## Future `.kaiju` Package
 
 A later package layout may look like:

@@ -30,6 +30,7 @@ cargo run -p kaiju-cli -- symbols tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- imports tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- exports tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- relocations tests/fixtures/raw.bin
+cargo run -p kaiju-cli -- network tests/fixtures/network-evidence.txt
 cargo run -p kaiju-cli -- arch
 ```
 
@@ -49,6 +50,7 @@ because raw input has no entrypoint and no known architecture.
 - `docs/architecture.md` matches crate boundaries.
 - `docs/loader-model.md` matches loader behavior.
 - `docs/project-format.md` matches `kaiju export` output.
+- `docs/network-model.md` matches `kaiju network` output.
 - `docs/snapshot-testing.md` matches the fixtures in `tests/snapshots/`.
 - `docs/threat-model.md` covers new parser or execution surfaces.
 - No GUI, decompiler, dynamic plugin loading, or script execution is claimed

@@ -31,7 +31,10 @@ what works:
 - PE import tables
 - PE export tables
 - PE base relocations
+- Mach-O symbol tables
+- Mach-O undefined-symbol imports
 - strings
+- offline network evidence topology
 - loader diagnostics
 - small x86-64 disassembly
 - direct-branch CFGs
@@ -48,10 +51,12 @@ cargo run -p kaiju-cli -- symbols tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- imports tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- exports tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- relocations tests/fixtures/raw.bin
+cargo run -p kaiju-cli -- network tests/fixtures/network-evidence.txt
 ```
 
 not yet:
 
+- active network scanning or packet capture
 - full parsers
 - full disassembly
 - lifting worth bragging about

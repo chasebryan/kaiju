@@ -1,0 +1,6 @@
+# Offline evidence captured from authorized sources.
+workstation.local -> https://api.internal.example/v1/login
+api.internal.example -> db.internal:5432 tcp
+dns laptop.local resolver.internal:53 udp
+tcp 10.0.0.4:51110 10.0.0.8:443 ESTABLISHED
+noise without endpoints

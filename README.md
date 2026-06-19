@@ -1,4 +1,4 @@
-<img width="1800" height="752" alt="kaiju_word_banner" src="https://github.com/user-attachments/assets/940b5c09-fdb6-45fe-bcda-e3de0af0af26" />![Uploading ka<?xml version="1.0" encoding="UTF-8"?>
+<img width="1800" height="752" alt="kaiju_word_banner" src="https://github.com/user-attachments/assets/940b5c09-fdb6-45fe-bcda-e3de0af0af26" />
 <svg id="kaiju-word-banner" xmlns="http://www.w3.org/2000/svg" width="1800" height="752" viewBox="0 0 797 333" role="img" aria-labelledby="title desc">
   <title id="title">KAIJU red word banner</title>
   <desc id="desc">Standalone transparent SVG banner containing only the word KAIJU in a jagged red brush style.</desc>

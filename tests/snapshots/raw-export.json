@@ -14,6 +14,7 @@
     "symbols": 0,
     "imports": 0,
     "exports": 0,
+    "relocations": 0,
     "diagnostics": 1,
     "strings": 1,
     "functions": 0,
@@ -32,6 +33,7 @@
   "symbols": [],
   "imports": [],
   "exports": [],
+  "relocations": [],
   "strings": [
     {
       "file_offset": 0,

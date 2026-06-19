@@ -248,6 +248,7 @@ mod tests {
             symbols: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
+            relocations: Vec::new(),
             diagnostics: Vec::new(),
         }
     }

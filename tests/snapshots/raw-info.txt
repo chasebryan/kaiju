@@ -9,3 +9,4 @@ Sections: 0
 Symbols: 0
 Imports: 0
 Exports: 0
+Relocations: 0

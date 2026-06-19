@@ -17,7 +17,8 @@ Kaiju loads bytes first, then normalizes recognized file formats into a common
 - ELF: limited parser for class, endian, machine, entrypoint, section headers,
   `PT_LOAD` memory regions, and `.symtab` / `.dynsym` symbol names.
 - PE: limited parser for PE32/PE32+, machine, image base, entrypoint, section
-  headers, section-backed memory regions, import tables, and export tables.
+  headers, section-backed memory regions, import tables, export tables, and
+  base relocation tables.
 - Mach-O: limited parser for 32-bit and 64-bit thin headers, CPU/endian
   metadata, `LC_SEGMENT` / `LC_SEGMENT_64` memory maps, section metadata, and
   `LC_MAIN` entrypoints. Universal/fat Mach-O inputs are still detection-only.
@@ -41,6 +42,7 @@ pub struct LoadedBinary {
     pub symbols: Vec<Symbol>,
     pub imports: Vec<Import>,
     pub exports: Vec<Export>,
+    pub relocations: Vec<Relocation>,
     pub diagnostics: Vec<Diagnostic>,
 }
 ```
@@ -79,7 +81,7 @@ Loader code must:
 
 ## Future Work
 
-The next loader expansions should add ELF imports/relocations, PE base
-relocations and COFF symbols, richer Mach-O symbols/imports/relocations,
-universal/fat Mach-O member selection, and fuzz targets for malformed headers
-and inconsistent section/segment tables.
+The next loader expansions should add ELF imports/relocations, PE COFF symbols,
+richer Mach-O symbols/imports/relocations, universal/fat Mach-O member
+selection, and fuzz targets for malformed headers and inconsistent
+section/segment tables.

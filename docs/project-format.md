@@ -18,6 +18,7 @@ The command loads a binary, runs the default analysis passes, and prints a
 - loader symbols
 - loader imports
 - loader exports
+- loader relocations
 - discovered functions
 - basic block summaries
 - extracted strings

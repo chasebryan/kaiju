@@ -100,7 +100,7 @@ linked string tables, malformed symbol-table tests, and CLI coverage for symbol
 counts without claiming imports or relocations.
 
 The PE import slice added bounded PE32/PE32+ import-directory parsing, named and
-ordinal import rows, malformed import-table tests, project export coverage, and
+ordinal import rows, malformed import-table tests, project import coverage, and
 a read-only `kaiju imports <file>` command without claiming PE exports or
 relocations.
 
@@ -109,3 +109,9 @@ named exports, ordinal-only exports, and forwarded exports, plus malformed
 export-table tests, project export coverage, and a read-only
 `kaiju exports <file>` command without claiming PE base relocations or COFF
 symbols.
+
+The PE relocation slice added bounded base-relocation directory parsing for
+relocation blocks, ABSOLUTE padding, DIR64/HIGHLOW/HIGH entries, and unknown
+nonzero relocation types, plus malformed relocation-block tests, project
+relocation coverage, and a read-only `kaiju relocations <file>` command without
+claiming PE COFF symbols.

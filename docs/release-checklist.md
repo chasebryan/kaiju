@@ -28,6 +28,7 @@ cargo run -p kaiju-cli -- export tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- symbols tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- imports tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- exports tests/fixtures/raw.bin
+cargo run -p kaiju-cli -- relocations tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- arch
 ```
 

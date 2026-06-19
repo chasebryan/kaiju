@@ -139,6 +139,12 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), CliError> {
             print_exports(&binary);
             Ok(())
         }
+        "relocations" => {
+            let path = read_single_path_arg(&mut args, "relocations")?;
+            let binary = load_path(path)?;
+            print_relocations(&binary);
+            Ok(())
+        }
         "xrefs" => {
             let path = read_single_path_arg(&mut args, "xrefs")?;
             let (project, _reports) = analyze_project(path)?;
@@ -472,6 +478,7 @@ fn print_usage() {
     eprintln!("  kaiju symbols <file>");
     eprintln!("  kaiju imports <file>");
     eprintln!("  kaiju exports <file>");
+    eprintln!("  kaiju relocations <file>");
     eprintln!("  kaiju xrefs <file>");
     eprintln!("  kaiju arch");
 }
@@ -492,6 +499,7 @@ fn print_info(binary: &LoadedBinary) {
     println!("Symbols: {}", binary.symbols.len());
     println!("Imports: {}", binary.imports.len());
     println!("Exports: {}", binary.exports.len());
+    println!("Relocations: {}", binary.relocations.len());
 }
 
 fn print_map(binary: &LoadedBinary) {
@@ -564,6 +572,13 @@ fn print_exports(binary: &LoadedBinary) {
             "{:<16} {:<24} {:<8} {:<18} {}",
             module, name, export.ordinal, address, forwarder
         );
+    }
+}
+
+fn print_relocations(binary: &LoadedBinary) {
+    println!("Address  Kind");
+    for relocation in &binary.relocations {
+        println!("{:<18} {}", relocation.address, relocation.kind);
     }
 }
 
@@ -782,6 +797,7 @@ fn print_analysis_summary(project: &Project, reports: &[AnalysisReport]) {
     println!("Passes: {}", reports.len());
     println!("Imports: {}", project.imports().len());
     println!("Exports: {}", project.exports().len());
+    println!("Relocations: {}", project.relocations().len());
     println!("Strings: {}", project.strings().len());
     println!("Functions: {}", project.functions().len());
     println!("Blocks: {}", project.basic_blocks().len());

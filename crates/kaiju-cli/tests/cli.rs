@@ -39,6 +39,7 @@ fn cli_info_reports_raw_fixture() {
     assert!(stdout.contains("Symbols: 0"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
+    assert!(stdout.contains("Relocations: 0"));
 }
 
 #[test]
@@ -123,6 +124,7 @@ fn cli_reports_pe_metadata_and_section_map() {
     assert!(stdout.contains("Sections: 1"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
+    assert!(stdout.contains("Relocations: 0"));
 
     let map = Command::new(env!("CARGO_BIN_EXE_kaiju"))
         .arg("map")
@@ -134,6 +136,29 @@ fn cli_reports_pe_metadata_and_section_map() {
     assert!(stdout.contains(".text"));
     assert!(stdout.contains("0x0000000140001000"));
     assert!(stdout.contains("r-x"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn cli_relocations_reports_pe_base_relocations() {
+    let path = write_temp_pe_relocation_fixture();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("relocations")
+        .arg(&path)
+        .output()
+        .expect("run kaiju relocations on PE");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Address  Kind"));
+    assert!(stdout.contains("0x0000000140001008"));
+    assert!(stdout.contains("pe-dir64"));
+    assert!(stdout.contains("0x0000000140001020"));
+    assert!(stdout.contains("pe-highlow"));
+    assert!(stdout.contains("0x0000000140001040"));
+    assert!(stdout.contains("pe-high"));
 
     let _ = fs::remove_file(path);
 }
@@ -390,6 +415,7 @@ fn cli_analyze_reports_project_summary() {
     assert!(stdout.contains("Passes: 4"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
+    assert!(stdout.contains("Relocations: 0"));
     assert!(stdout.contains("Functions: 1"));
     assert!(stdout.contains("Blocks:"));
     assert!(stdout.contains("Xrefs:"));
@@ -411,6 +437,7 @@ fn cli_analyze_raw_fixture_succeeds_with_warnings() {
     assert!(stdout.contains("Passes: 4"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
+    assert!(stdout.contains("Relocations: 0"));
     assert!(stdout.contains("Strings: 1"));
     assert!(stdout.contains("warning: binary does not define an entrypoint"));
 }
@@ -500,6 +527,19 @@ fn cli_exports_reports_header_for_files_without_exports() {
 }
 
 #[test]
+fn cli_relocations_reports_header_for_files_without_relocations() {
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("relocations")
+        .arg(fixture_path("raw.bin"))
+        .output()
+        .expect("run kaiju relocations");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert_eq!(stdout.trim_end(), "Address  Kind");
+}
+
+#[test]
 fn cli_xrefs_reports_cfg_flow_edges() {
     let path = write_temp_cfg_elf_fixture();
 
@@ -541,6 +581,7 @@ fn cli_raw_fixture_snapshots_match() {
     assert_raw_snapshot(&["export", RAW_FIXTURE_TOKEN], "raw-export.json");
     assert_raw_snapshot(&["imports", RAW_FIXTURE_TOKEN], "raw-imports.txt");
     assert_raw_snapshot(&["exports", RAW_FIXTURE_TOKEN], "raw-exports.txt");
+    assert_raw_snapshot(&["relocations", RAW_FIXTURE_TOKEN], "raw-relocations.txt");
 }
 
 #[test]
@@ -609,6 +650,19 @@ fn write_temp_pe_export_fixture() -> PathBuf {
         process::id()
     ));
     fs::write(&path, synthetic_pe32_plus_with_exports()).expect("write PE export fixture");
+    path
+}
+
+fn write_temp_pe_relocation_fixture() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "kaiju-cli-pe-relocations-{}-{unique}.exe",
+        process::id()
+    ));
+    fs::write(&path, synthetic_pe32_plus_with_relocations()).expect("write PE relocation fixture");
     path
 }
 
@@ -821,7 +875,7 @@ fn synthetic_pe32_plus_with_imports() -> Vec<u8> {
     let coff = 0x104;
     write_u16_le(&mut bytes, coff, 0x8664);
     write_u16_le(&mut bytes, coff + 2, 2);
-    write_u16_le(&mut bytes, coff + 16, 0x90);
+    write_u16_le(&mut bytes, coff + 16, 0xf0);
 
     let optional = coff + 20;
     write_u16_le(&mut bytes, optional, 0x20b);
@@ -831,15 +885,15 @@ fn synthetic_pe32_plus_with_imports() -> Vec<u8> {
     write_u32_le(&mut bytes, optional + 120, 0x2000);
     write_u32_le(&mut bytes, optional + 124, 0x40);
 
-    let text = 0x1a8;
+    let text = 0x208;
     bytes[text..text + 8].copy_from_slice(b".text\0\0\0");
     write_u32_le(&mut bytes, text + 8, 0x100);
     write_u32_le(&mut bytes, text + 12, 0x1000);
-    write_u32_le(&mut bytes, text + 16, 0x200);
-    write_u32_le(&mut bytes, text + 20, 0x200);
+    write_u32_le(&mut bytes, text + 16, 0x100);
+    write_u32_le(&mut bytes, text + 20, 0x300);
     write_u32_le(&mut bytes, text + 36, 0x6000_0000);
 
-    let rdata = 0x1d0;
+    let rdata = 0x230;
     bytes[rdata..rdata + 8].copy_from_slice(b".rdata\0\0");
     write_u32_le(&mut bytes, rdata + 8, 0x200);
     write_u32_le(&mut bytes, rdata + 12, 0x2000);
@@ -847,7 +901,7 @@ fn synthetic_pe32_plus_with_imports() -> Vec<u8> {
     write_u32_le(&mut bytes, rdata + 20, 0x400);
     write_u32_le(&mut bytes, rdata + 36, 0x4000_0000);
 
-    bytes[0x200..0x204].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
+    bytes[0x300..0x304].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
 
     write_u32_le(&mut bytes, 0x400, 0x2080);
     write_u32_le(&mut bytes, 0x40c, 0x2060);
@@ -873,7 +927,7 @@ fn synthetic_pe32_plus_with_exports() -> Vec<u8> {
     let coff = 0x104;
     write_u16_le(&mut bytes, coff, 0x8664);
     write_u16_le(&mut bytes, coff + 2, 2);
-    write_u16_le(&mut bytes, coff + 16, 0x90);
+    write_u16_le(&mut bytes, coff + 16, 0xf0);
 
     let optional = coff + 20;
     write_u16_le(&mut bytes, optional, 0x20b);
@@ -883,15 +937,15 @@ fn synthetic_pe32_plus_with_exports() -> Vec<u8> {
     write_u32_le(&mut bytes, optional + 112, 0x2000);
     write_u32_le(&mut bytes, optional + 116, 0x100);
 
-    let text = 0x1a8;
+    let text = 0x208;
     bytes[text..text + 8].copy_from_slice(b".text\0\0\0");
     write_u32_le(&mut bytes, text + 8, 0x100);
     write_u32_le(&mut bytes, text + 12, 0x1000);
-    write_u32_le(&mut bytes, text + 16, 0x200);
-    write_u32_le(&mut bytes, text + 20, 0x200);
+    write_u32_le(&mut bytes, text + 16, 0x100);
+    write_u32_le(&mut bytes, text + 20, 0x300);
     write_u32_le(&mut bytes, text + 36, 0x6000_0000);
 
-    let rdata = 0x1d0;
+    let rdata = 0x230;
     bytes[rdata..rdata + 8].copy_from_slice(b".rdata\0\0");
     write_u32_le(&mut bytes, rdata + 8, 0x200);
     write_u32_le(&mut bytes, rdata + 12, 0x2000);
@@ -899,7 +953,7 @@ fn synthetic_pe32_plus_with_exports() -> Vec<u8> {
     write_u32_le(&mut bytes, rdata + 20, 0x400);
     write_u32_le(&mut bytes, rdata + 36, 0x4000_0000);
 
-    bytes[0x200..0x204].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
+    bytes[0x300..0x304].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
 
     write_u32_le(&mut bytes, 0x40c, 0x2060);
     write_u32_le(&mut bytes, 0x410, 1);
@@ -920,6 +974,53 @@ fn synthetic_pe32_plus_with_exports() -> Vec<u8> {
     bytes[0x4c0..0x4ce].copy_from_slice(b"OTHER.Forward\0");
     bytes[0x4d0..0x4dd].copy_from_slice(b"ExportedFunc\0");
     bytes[0x4e0..0x4ee].copy_from_slice(b"ForwardedFunc\0");
+
+    bytes
+}
+
+fn synthetic_pe32_plus_with_relocations() -> Vec<u8> {
+    let mut bytes = vec![0_u8; 0x800];
+    bytes[0] = b'M';
+    bytes[1] = b'Z';
+    write_u32_le(&mut bytes, 0x3c, 0x100);
+    bytes[0x100..0x104].copy_from_slice(b"PE\0\0");
+
+    let coff = 0x104;
+    write_u16_le(&mut bytes, coff, 0x8664);
+    write_u16_le(&mut bytes, coff + 2, 2);
+    write_u16_le(&mut bytes, coff + 16, 0xf0);
+
+    let optional = coff + 20;
+    write_u16_le(&mut bytes, optional, 0x20b);
+    write_u32_le(&mut bytes, optional + 16, 0x1000);
+    write_u64_le(&mut bytes, optional + 24, 0x140000000);
+    write_u32_le(&mut bytes, optional + 108, 16);
+    write_u32_le(&mut bytes, optional + 152, 0x3000);
+    write_u32_le(&mut bytes, optional + 156, 0x10);
+
+    let text = 0x208;
+    bytes[text..text + 8].copy_from_slice(b".text\0\0\0");
+    write_u32_le(&mut bytes, text + 8, 0x100);
+    write_u32_le(&mut bytes, text + 12, 0x1000);
+    write_u32_le(&mut bytes, text + 16, 0x200);
+    write_u32_le(&mut bytes, text + 20, 0x300);
+    write_u32_le(&mut bytes, text + 36, 0x6000_0000);
+
+    let reloc = 0x230;
+    bytes[reloc..reloc + 8].copy_from_slice(b".reloc\0\0");
+    write_u32_le(&mut bytes, reloc + 8, 0x100);
+    write_u32_le(&mut bytes, reloc + 12, 0x3000);
+    write_u32_le(&mut bytes, reloc + 16, 0x200);
+    write_u32_le(&mut bytes, reloc + 20, 0x500);
+    write_u32_le(&mut bytes, reloc + 36, 0x4000_0000);
+
+    bytes[0x300..0x304].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
+    write_u32_le(&mut bytes, 0x500, 0x1000);
+    write_u32_le(&mut bytes, 0x504, 0x10);
+    write_u16_le(&mut bytes, 0x508, (10 << 12) | 0x008);
+    write_u16_le(&mut bytes, 0x50a, (3 << 12) | 0x020);
+    write_u16_le(&mut bytes, 0x50c, (1 << 12) | 0x040);
+    write_u16_le(&mut bytes, 0x50e, 0);
 
     bytes
 }

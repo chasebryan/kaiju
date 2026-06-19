@@ -45,6 +45,7 @@ pub struct LoadedBinary {
     pub symbols: Vec<Symbol>,
     pub imports: Vec<Import>,
     pub exports: Vec<Export>,
+    pub relocations: Vec<Relocation>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -78,6 +79,12 @@ pub struct Export {
     pub ordinal: u32,
     pub address: Option<Address>,
     pub forwarder: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Relocation {
+    pub address: Address,
+    pub kind: String,
 }
 
 pub trait Loader {
@@ -224,6 +231,7 @@ impl Loader for MachOLoader {
                     symbols: Vec::new(),
                     imports: Vec::new(),
                     exports: Vec::new(),
+                    relocations: Vec::new(),
                     diagnostics,
                 })
             }
@@ -247,9 +255,10 @@ impl Loader for PeLoader {
         let sections = parse_pe_sections(bytes, &header)?;
         let imports = parse_pe_imports(bytes, &header, &sections)?;
         let exports = parse_pe_exports(bytes, &header, &sections)?;
+        let relocations = parse_pe_relocations(bytes, &header, &sections)?;
         let mut memory_map = MemoryMap::new();
         let mut diagnostics = vec![loader_note(
-            "PE loader uses limited metadata parsing; COFF symbols and base relocations are not yet populated",
+            "PE loader uses limited metadata parsing; COFF symbols are not yet populated",
         )];
 
         for section in &sections {
@@ -309,6 +318,7 @@ impl Loader for PeLoader {
             symbols: Vec::new(),
             imports,
             exports,
+            relocations,
             diagnostics,
         })
     }
@@ -391,6 +401,7 @@ impl Loader for ElfLoader {
             symbols,
             imports: Vec::new(),
             exports: Vec::new(),
+            relocations: Vec::new(),
             diagnostics,
         })
     }
@@ -442,11 +453,20 @@ const PE32_PLUS_DATA_DIRECTORY_OFFSET: u64 = 112;
 const PE_DATA_DIRECTORY_SIZE: u64 = 8;
 const PE_EXPORT_DIRECTORY_INDEX: u32 = 0;
 const PE_IMPORT_DIRECTORY_INDEX: u32 = 1;
+const PE_BASE_RELOCATION_DIRECTORY_INDEX: u32 = 5;
 const PE_EXPORT_DIRECTORY_SIZE: u64 = 40;
 const PE_IMPORT_DESCRIPTOR_SIZE: u64 = 20;
 const PE_EXPORT_ADDRESS_TABLE_ENTRY_SIZE: u64 = 4;
 const PE_EXPORT_NAME_POINTER_ENTRY_SIZE: u64 = 4;
 const PE_EXPORT_ORDINAL_TABLE_ENTRY_SIZE: u64 = 2;
+const PE_BASE_RELOCATION_BLOCK_HEADER_SIZE: u64 = 8;
+const PE_BASE_RELOCATION_ENTRY_SIZE: u64 = 2;
+const IMAGE_REL_BASED_ABSOLUTE: u16 = 0;
+const IMAGE_REL_BASED_HIGH: u16 = 1;
+const IMAGE_REL_BASED_LOW: u16 = 2;
+const IMAGE_REL_BASED_HIGHLOW: u16 = 3;
+const IMAGE_REL_BASED_HIGHADJ: u16 = 4;
+const IMAGE_REL_BASED_DIR64: u16 = 10;
 const PE32_IMPORT_LOOKUP_ENTRY_SIZE: u64 = 4;
 const PE32_PLUS_IMPORT_LOOKUP_ENTRY_SIZE: u64 = 8;
 const PE32_ORDINAL_FLAG: u64 = 0x8000_0000;
@@ -536,6 +556,7 @@ struct PeHeader {
     section_count: u16,
     export_directory: Option<PeDataDirectory>,
     import_directory: Option<PeDataDirectory>,
+    base_relocation_directory: Option<PeDataDirectory>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -618,6 +639,7 @@ fn load_as_single_region(
         symbols: Vec::new(),
         imports: Vec::new(),
         exports: Vec::new(),
+        relocations: Vec::new(),
         diagnostics,
     }
 }
@@ -1019,6 +1041,14 @@ fn parse_pe_header(bytes: &[u8]) -> Result<PeHeader> {
         PE_IMPORT_DIRECTORY_INDEX,
         "PE import data directory",
     )?;
+    let base_relocation_directory = parse_pe_data_directory(
+        bytes,
+        kind,
+        optional_header_offset,
+        u64::from(optional_header_size),
+        PE_BASE_RELOCATION_DIRECTORY_INDEX,
+        "PE base relocation data directory",
+    )?;
 
     Ok(PeHeader {
         kind,
@@ -1029,6 +1059,7 @@ fn parse_pe_header(bytes: &[u8]) -> Result<PeHeader> {
         section_count,
         export_directory,
         import_directory,
+        base_relocation_directory,
     })
 }
 
@@ -1189,6 +1220,124 @@ fn pe_section_name(bytes: &[u8], index: usize) -> String {
 struct PeFileLocation {
     offset: u64,
     limit: u64,
+}
+
+fn parse_pe_relocations(
+    bytes: &[u8],
+    header: &PeHeader,
+    sections: &[PeSection],
+) -> Result<Vec<Relocation>> {
+    let Some(relocation_directory) = header.base_relocation_directory else {
+        return Ok(Vec::new());
+    };
+
+    let relocation_size = u64::from(relocation_directory.size);
+    if relocation_size == 0 {
+        return Ok(Vec::new());
+    }
+    let directory_location = pe_rva_to_file_location(u64::from(relocation_directory.rva), sections)
+        .ok_or_else(|| malformed("PE base relocation directory RVA does not map to file data"))?;
+    let directory_end = checked_add_offset(
+        directory_location.offset,
+        relocation_size,
+        "PE base relocation directory",
+    )?;
+    if directory_end > directory_location.limit {
+        return Err(malformed(
+            "PE base relocation directory extends beyond section file data",
+        ));
+    }
+    checked_range(
+        bytes,
+        directory_location.offset,
+        relocation_size,
+        "PE base relocation directory",
+    )?;
+
+    let mut relocations = Vec::new();
+    let mut block_offset = directory_location.offset;
+    while block_offset < directory_end {
+        checked_range(
+            bytes,
+            block_offset,
+            PE_BASE_RELOCATION_BLOCK_HEADER_SIZE,
+            "PE base relocation block header",
+        )?;
+        let page_rva = read_u32(
+            bytes,
+            block_offset,
+            Endian::Little,
+            "PE base relocation page RVA",
+        )?;
+        let block_size = u64::from(read_u32(
+            bytes,
+            block_offset + 4,
+            Endian::Little,
+            "PE base relocation block size",
+        )?);
+        if block_size < PE_BASE_RELOCATION_BLOCK_HEADER_SIZE {
+            return Err(malformed("PE base relocation block size is too small"));
+        }
+        let block_end = checked_add_offset(block_offset, block_size, "PE base relocation block")?;
+        if block_end > directory_end {
+            return Err(malformed(
+                "PE base relocation block extends beyond relocation directory",
+            ));
+        }
+
+        let entries_size = block_size - PE_BASE_RELOCATION_BLOCK_HEADER_SIZE;
+        if entries_size % PE_BASE_RELOCATION_ENTRY_SIZE != 0 {
+            return Err(malformed(
+                "PE base relocation entries are not 2-byte aligned",
+            ));
+        }
+        let entry_count = entries_size / PE_BASE_RELOCATION_ENTRY_SIZE;
+        for index in 0..entry_count {
+            let entry_offset = block_offset
+                .checked_add(PE_BASE_RELOCATION_BLOCK_HEADER_SIZE)
+                .and_then(|offset| {
+                    offset.checked_add(index.checked_mul(PE_BASE_RELOCATION_ENTRY_SIZE)?)
+                })
+                .ok_or_else(|| malformed("PE base relocation entry offset overflow"))?;
+            let entry = read_u16(
+                bytes,
+                entry_offset,
+                Endian::Little,
+                "PE base relocation entry",
+            )?;
+            let relocation_type = entry >> 12;
+            if relocation_type == IMAGE_REL_BASED_ABSOLUTE {
+                continue;
+            }
+            let entry_rva = u64::from(page_rva)
+                .checked_add(u64::from(entry & 0x0fff))
+                .ok_or_else(|| malformed("PE base relocation RVA overflow"))?;
+            let address = header
+                .image_base
+                .checked_add(entry_rva)
+                .ok_or_else(|| malformed("PE base relocation address overflow"))?;
+            relocations.push(Relocation {
+                address: Address::new(address),
+                kind: pe_base_relocation_kind(relocation_type),
+            });
+        }
+
+        block_offset = block_end;
+    }
+
+    Ok(relocations)
+}
+
+fn pe_base_relocation_kind(relocation_type: u16) -> String {
+    match relocation_type {
+        IMAGE_REL_BASED_ABSOLUTE => "pe-absolute".to_string(),
+        IMAGE_REL_BASED_HIGH => "pe-high".to_string(),
+        IMAGE_REL_BASED_LOW => "pe-low".to_string(),
+        IMAGE_REL_BASED_HIGHLOW => "pe-highlow".to_string(),
+        IMAGE_REL_BASED_HIGHADJ => "pe-highadj".to_string(),
+        IMAGE_REL_BASED_DIR64 => "pe-dir64".to_string(),
+        _ => format!("pe-unknown-{relocation_type}"),
+    }
 }
 
 fn parse_pe_exports(
@@ -2364,6 +2513,7 @@ mod tests {
         assert!(binary.sections[0].permissions.execute);
         assert!(binary.imports.is_empty());
         assert!(binary.exports.is_empty());
+        assert!(binary.relocations.is_empty());
         assert_eq!(binary.memory_map.regions().len(), 2);
 
         let text = &binary.memory_map.regions()[0];
@@ -2406,9 +2556,7 @@ mod tests {
         assert_eq!(binary.imports[1].thunk, Some(Address::new(0x1400020a8)));
         assert!(binary.diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Note
-                && diagnostic
-                    .message
-                    .contains("COFF symbols and base relocations")
+                && diagnostic.message.contains("COFF symbols")
         }));
     }
 
@@ -2435,6 +2583,25 @@ mod tests {
         assert_eq!(binary.exports[2].ordinal, 3);
         assert_eq!(binary.exports[2].address, Some(Address::new(0x140001010)));
         assert_eq!(binary.exports[2].forwarder, None);
+    }
+
+    #[test]
+    fn loads_pe32_plus_base_relocations() {
+        let bytes = synthetic_pe32_plus_with_relocations();
+        let binary = load_bytes(PathBuf::from("sample.exe"), &bytes).expect("load PE");
+
+        assert_eq!(binary.format, BinaryFormat::Pe);
+        assert_eq!(binary.relocations.len(), 3);
+        assert_eq!(binary.relocations[0].address, Address::new(0x140001008));
+        assert_eq!(binary.relocations[0].kind, "pe-dir64");
+        assert_eq!(binary.relocations[1].address, Address::new(0x140001020));
+        assert_eq!(binary.relocations[1].kind, "pe-highlow");
+        assert_eq!(binary.relocations[2].address, Address::new(0x140001040));
+        assert_eq!(binary.relocations[2].kind, "pe-high");
+        assert!(binary.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Note
+                && diagnostic.message.contains("COFF symbols")
+        }));
     }
 
     #[test]
@@ -2723,6 +2890,47 @@ mod tests {
         assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
     }
 
+    #[test]
+    fn pe_base_relocation_directory_outside_file_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus_with_relocations();
+        let relocation_directory = pe32_plus_base_relocation_directory_offset();
+        write_u32_le(&mut bytes, relocation_directory, 0x5000);
+
+        let error = load_bytes(PathBuf::from("bad.exe"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn pe_base_relocation_block_too_small_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus_with_relocations();
+        write_u32_le(&mut bytes, 0x500 + 4, 6);
+
+        let error = load_bytes(PathBuf::from("bad.exe"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn pe_base_relocation_entries_misaligned_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus_with_relocations();
+        write_u32_le(&mut bytes, 0x500 + 4, 15);
+
+        let error = load_bytes(PathBuf::from("bad.exe"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn pe_base_relocation_block_overrun_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus_with_relocations();
+        write_u32_le(&mut bytes, 0x500 + 4, 0x20);
+
+        let error = load_bytes(PathBuf::from("bad.exe"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
     fn synthetic_pe32_plus() -> Vec<u8> {
         let mut bytes = vec![0_u8; 0x800];
         bytes[0] = b'M';
@@ -2781,7 +2989,7 @@ mod tests {
         let coff = 0x104;
         write_u16_le(&mut bytes, coff, IMAGE_FILE_MACHINE_AMD64);
         write_u16_le(&mut bytes, coff + 2, 2);
-        write_u16_le(&mut bytes, coff + 16, 0x90);
+        write_u16_le(&mut bytes, coff + 16, 0xf0);
 
         let optional = coff + 20;
         write_u16_le(&mut bytes, optional, PE32_PLUS_MAGIC);
@@ -2794,19 +3002,19 @@ mod tests {
 
         write_pe_section(
             &mut bytes,
-            0x1a8,
+            0x208,
             PeSectionSpec {
                 name: b".text\0\0\0",
                 virtual_size: 0x100,
                 virtual_address: 0x1000,
-                raw_size: 0x200,
-                raw_offset: 0x200,
+                raw_size: 0x100,
+                raw_offset: 0x300,
                 characteristics: IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE,
             },
         );
         write_pe_section(
             &mut bytes,
-            0x1d0,
+            0x230,
             PeSectionSpec {
                 name: b".rdata\0\0",
                 virtual_size: 0x200,
@@ -2817,7 +3025,7 @@ mod tests {
             },
         );
 
-        bytes[0x200..0x204].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
+        bytes[0x300..0x304].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
 
         write_u32_le(&mut bytes, 0x400, 0x2080);
         write_u32_le(&mut bytes, 0x40c, 0x2060);
@@ -2843,7 +3051,7 @@ mod tests {
         let coff = 0x104;
         write_u16_le(&mut bytes, coff, IMAGE_FILE_MACHINE_AMD64);
         write_u16_le(&mut bytes, coff + 2, 2);
-        write_u16_le(&mut bytes, coff + 16, 0x90);
+        write_u16_le(&mut bytes, coff + 16, 0xf0);
 
         let optional = coff + 20;
         write_u16_le(&mut bytes, optional, PE32_PLUS_MAGIC);
@@ -2856,19 +3064,19 @@ mod tests {
 
         write_pe_section(
             &mut bytes,
-            0x1a8,
+            0x208,
             PeSectionSpec {
                 name: b".text\0\0\0",
                 virtual_size: 0x100,
                 virtual_address: 0x1000,
-                raw_size: 0x200,
-                raw_offset: 0x200,
+                raw_size: 0x100,
+                raw_offset: 0x300,
                 characteristics: IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE,
             },
         );
         write_pe_section(
             &mut bytes,
-            0x1d0,
+            0x230,
             PeSectionSpec {
                 name: b".rdata\0\0",
                 virtual_size: 0x200,
@@ -2879,7 +3087,7 @@ mod tests {
             },
         );
 
-        bytes[0x200..0x204].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
+        bytes[0x300..0x304].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
 
         write_u32_le(&mut bytes, 0x40c, 0x2060);
         write_u32_le(&mut bytes, 0x410, 1);
@@ -2904,10 +3112,73 @@ mod tests {
         bytes
     }
 
+    fn synthetic_pe32_plus_with_relocations() -> Vec<u8> {
+        let mut bytes = vec![0_u8; 0x800];
+        bytes[0] = b'M';
+        bytes[1] = b'Z';
+        write_u32_le(&mut bytes, 0x3c, 0x100);
+        bytes[0x100..0x104].copy_from_slice(PE_SIGNATURE);
+
+        let coff = 0x104;
+        write_u16_le(&mut bytes, coff, IMAGE_FILE_MACHINE_AMD64);
+        write_u16_le(&mut bytes, coff + 2, 2);
+        write_u16_le(&mut bytes, coff + 16, 0xf0);
+
+        let optional = coff + 20;
+        write_u16_le(&mut bytes, optional, PE32_PLUS_MAGIC);
+        write_u32_le(&mut bytes, optional + 16, 0x1000);
+        write_u64_le(&mut bytes, optional + 24, 0x140000000);
+        write_u32_le(&mut bytes, optional + 108, 16);
+        let relocation_directory = pe32_plus_base_relocation_directory_offset();
+        write_u32_le(&mut bytes, relocation_directory, 0x3000);
+        write_u32_le(&mut bytes, relocation_directory + 4, 0x10);
+
+        write_pe_section(
+            &mut bytes,
+            0x208,
+            PeSectionSpec {
+                name: b".text\0\0\0",
+                virtual_size: 0x100,
+                virtual_address: 0x1000,
+                raw_size: 0x200,
+                raw_offset: 0x300,
+                characteristics: IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE,
+            },
+        );
+        write_pe_section(
+            &mut bytes,
+            0x230,
+            PeSectionSpec {
+                name: b".reloc\0\0",
+                virtual_size: 0x100,
+                virtual_address: 0x3000,
+                raw_size: 0x200,
+                raw_offset: 0x500,
+                characteristics: IMAGE_SCN_MEM_READ,
+            },
+        );
+
+        bytes[0x300..0x304].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
+        write_u32_le(&mut bytes, 0x500, 0x1000);
+        write_u32_le(&mut bytes, 0x504, 0x10);
+        write_u16_le(&mut bytes, 0x508, (IMAGE_REL_BASED_DIR64 << 12) | 0x008);
+        write_u16_le(&mut bytes, 0x50a, (IMAGE_REL_BASED_HIGHLOW << 12) | 0x020);
+        write_u16_le(&mut bytes, 0x50c, (IMAGE_REL_BASED_HIGH << 12) | 0x040);
+        write_u16_le(&mut bytes, 0x50e, IMAGE_REL_BASED_ABSOLUTE << 12);
+
+        bytes
+    }
+
     fn pe32_plus_export_directory_offset() -> usize {
         0x118
             + PE32_PLUS_DATA_DIRECTORY_OFFSET as usize
             + (PE_EXPORT_DIRECTORY_INDEX as usize * PE_DATA_DIRECTORY_SIZE as usize)
+    }
+
+    fn pe32_plus_base_relocation_directory_offset() -> usize {
+        0x118
+            + PE32_PLUS_DATA_DIRECTORY_OFFSET as usize
+            + (PE_BASE_RELOCATION_DIRECTORY_INDEX as usize * PE_DATA_DIRECTORY_SIZE as usize)
     }
 
     fn pe32_plus_import_directory_offset() -> usize {

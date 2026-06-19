@@ -29,6 +29,8 @@ binaries. The default stance is defensive parsing.
 - Bounded PE import descriptor, thunk, DLL-name, and import-name parsing tests.
 - Bounded PE export directory, address-table, name-table, ordinal-table, and
   forwarder parsing tests.
+- Bounded PE base relocation directory, block-size, entry-alignment, and
+  block-overrun parsing tests.
 
 ## Required Rules
 

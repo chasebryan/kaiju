@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use kaiju_core::{Address, DiagnosticSeverity};
-use kaiju_loader::{Export, Import, LoadedBinary, Symbol};
+use kaiju_loader::{Export, Import, LoadedBinary, Relocation, Symbol};
 
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -17,6 +17,7 @@ pub struct Project {
     symbols: Vec<ProjectSymbol>,
     imports: Vec<ProjectImport>,
     exports: Vec<ProjectExport>,
+    relocations: Vec<ProjectRelocation>,
     xrefs: BTreeSet<CrossReference>,
     analysis_facts: Vec<AnalysisFact>,
 }
@@ -27,6 +28,11 @@ impl Project {
         let symbols = binary.symbols.iter().map(ProjectSymbol::from).collect();
         let imports = binary.imports.iter().map(ProjectImport::from).collect();
         let exports = binary.exports.iter().map(ProjectExport::from).collect();
+        let relocations = binary
+            .relocations
+            .iter()
+            .map(ProjectRelocation::from)
+            .collect();
 
         Self {
             binary,
@@ -39,6 +45,7 @@ impl Project {
             symbols,
             imports,
             exports,
+            relocations,
             xrefs: BTreeSet::new(),
             analysis_facts: Vec::new(),
         }
@@ -189,6 +196,19 @@ impl Project {
         &self.exports
     }
 
+    pub fn add_relocation(&mut self, relocation: ProjectRelocation) {
+        if !self.relocations.contains(&relocation) {
+            self.relocations.push(relocation);
+            self.relocations
+                .sort_by_key(|entry| (entry.address, entry.kind.clone()));
+        }
+    }
+
+    #[must_use]
+    pub fn relocations(&self) -> &[ProjectRelocation] {
+        &self.relocations
+    }
+
     pub fn add_xref(&mut self, xref: CrossReference) {
         self.xrefs.insert(xref);
     }
@@ -256,6 +276,7 @@ impl Project {
             symbol_count: self.symbols.len(),
             import_count: self.imports.len(),
             export_count: self.exports.len(),
+            relocation_count: self.relocations.len(),
             diagnostic_count: self.binary.diagnostics.len(),
             string_count: self.strings.len(),
             function_count: self.functions.len(),
@@ -319,6 +340,7 @@ impl Project {
         push_json_usize_field(&mut json, 4, "symbols", summary.symbol_count, true);
         push_json_usize_field(&mut json, 4, "imports", summary.import_count, true);
         push_json_usize_field(&mut json, 4, "exports", summary.export_count, true);
+        push_json_usize_field(&mut json, 4, "relocations", summary.relocation_count, true);
         push_json_usize_field(&mut json, 4, "diagnostics", summary.diagnostic_count, true);
         push_json_usize_field(&mut json, 4, "strings", summary.string_count, true);
         push_json_usize_field(&mut json, 4, "functions", summary.function_count, true);
@@ -344,6 +366,8 @@ impl Project {
         json.push_str(",\n");
         push_exports_json(&mut json, self);
         json.push_str(",\n");
+        push_relocations_json(&mut json, self);
+        json.push_str(",\n");
         push_strings_json(&mut json, self);
         json.push_str(",\n");
         push_xrefs_json(&mut json, self);
@@ -368,6 +392,7 @@ pub struct ProjectSummary {
     pub symbol_count: usize,
     pub import_count: usize,
     pub export_count: usize,
+    pub relocation_count: usize,
     pub diagnostic_count: usize,
     pub string_count: usize,
     pub function_count: usize,
@@ -497,6 +522,21 @@ impl From<&Export> for ProjectExport {
             ordinal: export.ordinal,
             address: export.address,
             forwarder: export.forwarder.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRelocation {
+    pub address: Address,
+    pub kind: String,
+}
+
+impl From<&Relocation> for ProjectRelocation {
+    fn from(relocation: &Relocation) -> Self {
+        Self {
+            address: relocation.address,
+            kind: relocation.kind.clone(),
         }
     }
 }
@@ -719,6 +759,29 @@ fn push_exports_json(json: &mut String, project: &Project) {
             Some(forwarder) => push_json_field(json, 6, "forwarder", forwarder, false),
             None => push_json_null_field(json, 6, "forwarder", false),
         }
+        json.push_str("    }");
+        json.push_str(comma);
+        json.push('\n');
+    }
+    json.push_str("  ]");
+}
+
+fn push_relocations_json(json: &mut String, project: &Project) {
+    json.push_str("  \"relocations\": [");
+    if project.relocations.is_empty() {
+        json.push(']');
+        return;
+    }
+    json.push('\n');
+    for (index, relocation) in project.relocations.iter().enumerate() {
+        let comma = if index + 1 == project.relocations.len() {
+            ""
+        } else {
+            ","
+        };
+        json.push_str("    {\n");
+        push_json_address_field(json, 6, "address", Some(relocation.address), true);
+        push_json_field(json, 6, "kind", &relocation.kind, false);
         json.push_str("    }");
         json.push_str(comma);
         json.push('\n');
@@ -1100,6 +1163,32 @@ mod tests {
     }
 
     #[test]
+    fn creates_project_from_loaded_binary_and_preserves_relocations() {
+        let mut binary = test_binary();
+        binary.relocations.push(Relocation {
+            address: Address::new(0x140001008),
+            kind: "pe-dir64".to_string(),
+        });
+        binary.relocations.push(Relocation {
+            address: Address::new(0x140001020),
+            kind: "pe-highlow".to_string(),
+        });
+
+        let project = Project::from_loaded_binary(binary);
+
+        assert_eq!(project.relocations().len(), 2);
+        assert_eq!(project.relocations()[0].address, Address::new(0x140001008));
+        assert_eq!(project.relocations()[0].kind, "pe-dir64");
+        assert_eq!(project.relocations()[1].address, Address::new(0x140001020));
+        assert_eq!(project.relocations()[1].kind, "pe-highlow");
+        let json = project.to_json_pretty();
+        assert!(json.contains("\"relocations\": 2"));
+        assert!(json.contains("\"relocations\": ["));
+        assert!(json.contains("\"address\": \"0x0000000140001008\""));
+        assert!(json.contains("\"kind\": \"pe-highlow\""));
+    }
+
+    #[test]
     fn stores_labels_and_comments_by_address() {
         let mut project = Project::from_loaded_binary(test_binary());
 
@@ -1199,6 +1288,7 @@ mod tests {
         assert_eq!(summary.region_count, 1);
         assert_eq!(summary.import_count, 0);
         assert_eq!(summary.export_count, 0);
+        assert_eq!(summary.relocation_count, 0);
         assert_eq!(summary.diagnostic_count, 0);
         assert_eq!(summary.string_count, 1);
         assert_eq!(summary.function_count, 1);
@@ -1297,6 +1387,7 @@ mod tests {
             symbols: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
+            relocations: Vec::new(),
             diagnostics: Vec::new(),
         }
     }

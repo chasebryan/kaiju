@@ -38,11 +38,11 @@ entrypoint, program headers, section headers, section names, `.symtab` /
 `.dynsym` symbol names, and `PT_LOAD` regions. PE has a limited defensive parser
 for PE32/PE32+, COFF machine, optional-header image base and entrypoint, section
 headers, section names, section-backed memory regions, import tables, and export
-tables. Mach-O has a limited thin parser for CPU/endian
+tables, and base relocation tables. Mach-O has a limited thin parser for CPU/endian
 metadata, `LC_SEGMENT` / `LC_SEGMENT_64` memory maps, section metadata, and
 `LC_MAIN` entrypoint translation. Universal/fat Mach-O handling remains
-detection-only. Full parsing of relocations, COFF symbols, and format-specific
-edge cases is deferred.
+detection-only. Full parsing of COFF symbols, non-PE relocations, and
+format-specific edge cases is deferred.
 
 Loader diagnostics are attached to the normalized `LoadedBinary` model. They
 report conservative behavior such as raw fallback loading, limited Mach-O
@@ -127,6 +127,7 @@ Current project facts include:
 - normalized symbols copied from loader metadata
 - normalized imports copied from loader metadata
 - normalized exports copied from loader metadata
+- normalized relocations copied from loader metadata
 - cross-references
 - small namespaced analysis facts
 
@@ -176,8 +177,8 @@ can move through these descriptors.
 The project crate can now produce a deterministic `kaiju.project.v1` JSON
 snapshot. The snapshot is derived output for headless automation and tests. It
 includes binary metadata, summary counts, discovered functions, block summaries,
-loader diagnostics, symbols, imports, exports, strings, xrefs, and analysis
-facts.
+loader diagnostics, symbols, imports, exports, relocations, strings, xrefs, and
+analysis facts.
 
 This is not a full project database. Future `.kaiju` persistence should keep
 user annotations separate from regenerated analysis facts.

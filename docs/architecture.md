@@ -20,7 +20,8 @@ construction, IR lifting, scripting, plugins, and a GUI.
   extraction for ASCII and UTF-16LE data.
 - `kaiju-disasm`: normalized disassembly traits and instruction data model. It
   currently includes a minimal x86-64 decoder subset.
-- `kaiju-network`: offline network evidence parsing and topology inference.
+- `kaiju-network`: network evidence parsing, PCAP import, topology inference,
+  bounded payload inspection, and explicit TCP probe reports.
 - `kaiju-project`: in-memory project state that can hold a loaded binary and
   analysis facts.
 - `kaiju-cli`: headless command-line interface.
@@ -36,17 +37,18 @@ address `0x0`.
 
 ELF has a limited defensive parser for class, endian, machine architecture,
 entrypoint, program headers, section headers, section names, `.symtab` /
-`.dynsym` symbol names, undefined dynamic imports, REL/RELA relocation rows, and
-`PT_LOAD` regions. PE has a limited defensive parser for PE32/PE32+, COFF
-machine, optional-header image base and entrypoint, section headers, section
-names, section-backed memory regions, COFF symbol tables, import tables, export
-tables, and base relocation tables. Mach-O has a limited thin parser for
-CPU/endian metadata, `LC_SEGMENT` / `LC_SEGMENT_64` memory maps, section
-metadata, `LC_MAIN` entrypoint translation, `LC_SYMTAB` symbols, and undefined
-external imports. Universal/fat Mach-O handling remains detection-only. Full
-parsing of ELF dependency/version resolution, PE debug/PDB metadata, Mach-O
-relocations and dynamic-loader metadata, and format-specific edge cases is
-deferred.
+`.dynsym` symbol names, undefined dynamic imports, `DT_NEEDED` dependencies,
+REL/RELA relocation rows, and `PT_LOAD` regions. PE has a limited defensive
+parser for PE32/PE32+, COFF machine, optional-header image base and entrypoint,
+section headers, section names, section-backed memory regions, COFF symbol
+tables, import-DLL dependencies, import tables, export tables, and base
+relocation tables. Mach-O has a limited thin parser for CPU/endian metadata,
+`LC_SEGMENT` / `LC_SEGMENT_64` memory maps, section metadata, `LC_MAIN`
+entrypoint translation, `LC_SYMTAB` symbols, `LC_LOAD_DYLIB` dependencies, and
+undefined external imports. Universal/fat Mach-O handling remains
+detection-only. Full parsing of ELF dependency version metadata, PE debug/PDB
+metadata, Mach-O relocations and richer dynamic-loader metadata, and
+format-specific edge cases is deferred.
 
 Loader diagnostics are attached to the normalized `LoadedBinary` model. They
 report conservative behavior such as raw fallback loading, limited Mach-O
@@ -77,17 +79,17 @@ when the file offset belongs to an initialized mapped region. The current
 extractor supports printable ASCII and UTF-16LE strings with a configurable
 minimum character length.
 
-## Network Evidence Model
+## Network Model
 
-The `kaiju-network` crate adds offline network reverse-engineering support. It
-loads user-supplied evidence text and infers hosts, destination services, and
-directed edges while preserving source line numbers. It recognizes directional
-observations, URL endpoints, and simple socket-pair lines.
+The `kaiju-network` crate adds network reverse-engineering support. It can load
+user-supplied evidence text, import classic PCAP captures, infer hosts,
+destination services, and directed edges, and preserve source line or packet
+record provenance. Payloads are summarized with bounded ASCII and hex previews.
 
-This is not active collection. The model does not open sockets, probe remote
-hosts, capture packets, or inspect payloads. `kaiju network <evidence-file>`
-prints text by default and can emit Graphviz DOT or deterministic
-`kaiju.network.v1` JSON for automation.
+The same crate also owns explicit TCP probe and port-scan helpers. These open
+sockets only for user-supplied targets, use per-target timeouts, enforce target
+and byte limits, and return deterministic `kaiju.network.probe.v1` reports.
+There is no ambient discovery or privileged live interface capture backend.
 
 ## Disassembly Model
 
@@ -140,6 +142,7 @@ Current project facts include:
 - basic block summaries
 - CFG edges
 - extracted strings
+- normalized dependencies copied from loader metadata
 - normalized symbols copied from loader metadata
 - normalized imports copied from loader metadata
 - normalized exports copied from loader metadata
@@ -193,8 +196,8 @@ can move through these descriptors.
 The project crate can now produce a deterministic `kaiju.project.v1` JSON
 snapshot. The snapshot is derived output for headless automation and tests. It
 includes binary metadata, summary counts, discovered functions, block summaries,
-loader diagnostics, symbols, imports, exports, relocations, strings, xrefs, and
-analysis facts.
+loader diagnostics, dependencies, symbols, imports, exports, relocations,
+strings, xrefs, and analysis facts.
 
 This is not a full project database. Future `.kaiju` persistence should keep
 user annotations separate from regenerated analysis facts.

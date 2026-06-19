@@ -15,6 +15,7 @@ The command loads a binary, runs the default analysis passes, and prints a
 - binary metadata
 - summary counts
 - loader diagnostics
+- loader dependencies
 - loader symbols
 - loader imports
 - loader exports
@@ -33,16 +34,27 @@ under `summary.diagnostics`. Diagnostic rows include a normalized severity and
 message so headless automation can distinguish normal raw fallback notes from
 warnings about conservative or incomplete loader behavior.
 
-## Network Evidence Snapshot
+## Network Snapshots
 
 ```bash
 kaiju network <evidence-file> --format json
+kaiju network pcap <pcap-file> --format json
 ```
 
-This command prints a separate `kaiju.network.v1` JSON object for offline
-network evidence. It includes source name, summary counts, hosts, services,
-directed edges, observations, and source line numbers. It is deterministic
+These commands print a separate `kaiju.network.v1` JSON object for network
+evidence and packet captures. It includes source name, summary counts, hosts,
+services, directed edges, observations, provenance line or packet numbers, and
+bounded payload summaries when packet bytes are present. It is deterministic
 derived output and does not represent a persisted project database.
+
+```bash
+kaiju network probe --target HOST:PORT --format json
+kaiju network scan --host HOST --ports LIST --format json
+```
+
+These commands print `kaiju.network.probe.v1` JSON for explicit live TCP probe
+or scan results. Rows include target, status, resolved remote address, elapsed
+time, sent byte count, bounded received-payload summary, and any nonfatal error.
 
 ## Future `.kaiju` Package
 

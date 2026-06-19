@@ -1,12 +1,13 @@
 # Network Model
 
-Kaiju's network reverse-engineering support is offline and evidence-driven. It
-does not scan, probe, capture packets, intercept traffic, or open sockets.
+Kaiju's network reverse-engineering support is evidence-first, with explicit
+live TCP actions for authorized targets.
 
-The first command is:
+The offline evidence command is:
 
 ```bash
 kaiju network <evidence-file> [--format text|dot|json]
+kaiju network evidence <evidence-file> [--format text|dot|json]
 ```
 
 The evidence file is plain text from authorized sources such as architecture
@@ -28,6 +29,28 @@ The output is an inferred map, not ground truth. It includes:
 
 The JSON output uses schema `kaiju.network.v1`. It is deterministic derived
 output for headless automation, similar in spirit to the binary project
-snapshot. Future work can add structured imports for specific log formats, but
-new importers should preserve source line or record provenance and keep network
-collection outside Kaiju unless a separate capability model is designed first.
+snapshot.
+
+Classic PCAP imports use the same topology schema:
+
+```bash
+kaiju network pcap <pcap-file> [--format text|dot|json]
+```
+
+The current PCAP parser handles classic pcap with Ethernet IPv4/IPv6 packets
+and extracts TCP, UDP, ICMP, and unknown protocol observations. Packet payloads
+are bounded and summarized as byte length, captured preview length, payload
+kind, ASCII preview, and hex prefix.
+
+Live TCP probes are explicit:
+
+```bash
+kaiju network probe --target HOST:PORT [--timeout-ms N] [--read-bytes N] [--send-text TEXT | --send-hex HEX] [--format text|json]
+kaiju network scan --host HOST --ports LIST [--timeout-ms N] [--read-bytes N] [--send-text TEXT | --send-hex HEX] [--format text|json]
+```
+
+Probe and scan reports use schema `kaiju.network.probe.v1`. They open TCP
+sockets only for the targets supplied on the command line, apply per-target
+timeouts, enforce target and byte limits, and summarize any received payload.
+There is no ambient discovery, credential capture, exploit step, or privileged
+live interface sniffing backend.

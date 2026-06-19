@@ -16,14 +16,16 @@ Kaiju loads bytes first, then normalizes recognized file formats into a common
 
 - ELF: limited parser for class, endian, machine, entrypoint, section headers,
   `PT_LOAD` memory regions, `.symtab` / `.dynsym` symbol names, undefined
-  dynamic imports, and REL/RELA relocation rows.
+  dynamic imports, `DT_NEEDED` shared-library dependencies, and REL/RELA
+  relocation rows.
 - PE: limited parser for PE32/PE32+, machine, image base, entrypoint, section
   headers, section-backed memory regions, COFF symbol tables, import tables,
-  export tables, and base relocation tables.
+  import-DLL dependencies, export tables, and base relocation tables.
 - Mach-O: limited parser for 32-bit and 64-bit thin headers, CPU/endian
   metadata, `LC_SEGMENT` / `LC_SEGMENT_64` memory maps, section metadata, and
   `LC_MAIN` entrypoints, plus `LC_SYMTAB` symbols and undefined external
-  imports. Universal/fat Mach-O inputs are still detection-only.
+  imports, plus `LC_LOAD_DYLIB` dependencies. Universal/fat Mach-O inputs are
+  still detection-only.
 - Raw: unknown inputs map at virtual address `0x0` with read-only permissions.
 
 ## Normalized Output
@@ -41,6 +43,7 @@ pub struct LoadedBinary {
     pub entrypoint: Option<Address>,
     pub memory_map: MemoryMap,
     pub sections: Vec<Section>,
+    pub dependencies: Vec<Dependency>,
     pub symbols: Vec<Symbol>,
     pub imports: Vec<Import>,
     pub exports: Vec<Export>,
@@ -64,7 +67,7 @@ Current diagnostics include:
 - a note when an unknown file is loaded through the raw fallback at virtual
   address `0x0`
 - a note when thin Mach-O load commands are parsed without relocations or
-  dynamic loader metadata
+  binding metadata
 - a warning when universal/fat Mach-O magic is detected but no dedicated parser
   is available
 - notes that ELF and PE loading currently populate only limited metadata
@@ -83,7 +86,7 @@ Loader code must:
 
 ## Future Work
 
-The next loader expansions should add ELF dependency/version resolution, PE
-debug/PDB metadata, Mach-O relocations, richer dynamic-loader metadata,
+The next loader expansions should add ELF dependency version resolution, PE
+debug/PDB metadata, Mach-O relocations, richer Mach-O dynamic-loader metadata,
 universal/fat Mach-O member selection, and fuzz targets for malformed headers and
 inconsistent section/segment tables.

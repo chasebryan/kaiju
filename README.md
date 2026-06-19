@@ -25,16 +25,21 @@ what works:
 - memory maps
 - Mach-O segment maps
 - ELF symbol tables
+- ELF shared-library dependencies
 - ELF dynamic imports
 - ELF relocation tables
 - PE COFF symbols
+- PE import DLL dependencies
 - PE import tables
 - PE export tables
 - PE base relocations
 - Mach-O symbol tables
+- Mach-O dylib dependencies
 - Mach-O undefined-symbol imports
 - strings
-- offline network evidence topology
+- network evidence topology
+- classic PCAP topology and payload inspection
+- explicit TCP probes and port scans
 - loader diagnostics
 - small x86-64 disassembly
 - direct-branch CFGs
@@ -48,6 +53,7 @@ cargo run -p kaiju-cli -- info tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- map tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- diagnostics tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- symbols tests/fixtures/raw.bin
+cargo run -p kaiju-cli -- dependencies tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- imports tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- exports tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- relocations tests/fixtures/raw.bin
@@ -56,7 +62,7 @@ cargo run -p kaiju-cli -- network tests/fixtures/network-evidence.txt
 
 not yet:
 
-- active network scanning or packet capture
+- privileged live interface capture backend
 - full parsers
 - full disassembly
 - lifting worth bragging about

@@ -137,8 +137,13 @@ malformed symbol/string-table tests, and CLI coverage for Mach-O `symbols` and
 `imports` output without claiming relocations, dylib binding metadata, or
 universal/fat member selection.
 
-The offline network evidence slice added a dependency-free `kaiju-network`
-crate plus `kaiju network <evidence-file> [--format text|dot|json]` for
-inferring hosts, services, and directed edges from authorized evidence files.
-It deliberately avoids active probing, packet capture, payload inspection, and
-live socket access.
+The shared-library dependency slice added normalized dependency rows for ELF
+`DT_NEEDED`, PE import DLL names, and Mach-O `LC_LOAD_DYLIB`, plus project
+snapshot coverage and a read-only `kaiju dependencies <file>` command without
+claiming dependency versioning, delay-load metadata, or dylib binding metadata.
+
+The network capability slice added a dependency-free `kaiju-network` crate plus
+`kaiju network` evidence, PCAP, probe, and scan modes. It infers hosts,
+services, directed edges, and bounded payload summaries from authorized text
+evidence, classic PCAP captures, and explicit TCP socket probes without adding
+ambient discovery or privileged live interface sniffing.

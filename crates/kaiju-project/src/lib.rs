@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use kaiju_core::{Address, DiagnosticSeverity};
-use kaiju_loader::{Export, Import, LoadedBinary, Relocation, Symbol};
+use kaiju_loader::{Dependency, Export, Import, LoadedBinary, Relocation, Symbol};
 
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -14,6 +14,7 @@ pub struct Project {
     basic_blocks: BTreeMap<Address, ProjectBasicBlock>,
     cfg_edges: BTreeSet<ProjectCfgEdge>,
     strings: Vec<ProjectString>,
+    dependencies: Vec<ProjectDependency>,
     symbols: Vec<ProjectSymbol>,
     imports: Vec<ProjectImport>,
     exports: Vec<ProjectExport>,
@@ -26,6 +27,11 @@ impl Project {
     #[must_use]
     pub fn from_loaded_binary(binary: LoadedBinary) -> Self {
         let symbols = binary.symbols.iter().map(ProjectSymbol::from).collect();
+        let dependencies = binary
+            .dependencies
+            .iter()
+            .map(ProjectDependency::from)
+            .collect();
         let imports = binary.imports.iter().map(ProjectImport::from).collect();
         let exports = binary.exports.iter().map(ProjectExport::from).collect();
         let relocations = binary
@@ -42,6 +48,7 @@ impl Project {
             basic_blocks: BTreeMap::new(),
             cfg_edges: BTreeSet::new(),
             strings: Vec::new(),
+            dependencies,
             symbols,
             imports,
             exports,
@@ -155,6 +162,18 @@ impl Project {
     #[must_use]
     pub fn symbols(&self) -> &[ProjectSymbol] {
         &self.symbols
+    }
+
+    pub fn add_dependency(&mut self, dependency: ProjectDependency) {
+        if !self.dependencies.contains(&dependency) {
+            self.dependencies.push(dependency);
+            self.dependencies.sort_by_key(|entry| entry.name.clone());
+        }
+    }
+
+    #[must_use]
+    pub fn dependencies(&self) -> &[ProjectDependency] {
+        &self.dependencies
     }
 
     pub fn add_import(&mut self, import: ProjectImport) {
@@ -273,6 +292,7 @@ impl Project {
             entrypoint: self.binary.entrypoint,
             region_count: self.binary.memory_map.regions().len(),
             section_count: self.binary.sections.len(),
+            dependency_count: self.dependencies.len(),
             symbol_count: self.symbols.len(),
             import_count: self.imports.len(),
             export_count: self.exports.len(),
@@ -337,6 +357,7 @@ impl Project {
         json.push_str("  \"summary\": {\n");
         push_json_usize_field(&mut json, 4, "regions", summary.region_count, true);
         push_json_usize_field(&mut json, 4, "sections", summary.section_count, true);
+        push_json_usize_field(&mut json, 4, "dependencies", summary.dependency_count, true);
         push_json_usize_field(&mut json, 4, "symbols", summary.symbol_count, true);
         push_json_usize_field(&mut json, 4, "imports", summary.import_count, true);
         push_json_usize_field(&mut json, 4, "exports", summary.export_count, true);
@@ -361,6 +382,8 @@ impl Project {
         push_diagnostics_json(&mut json, self);
         json.push_str(",\n");
         push_symbols_json(&mut json, self);
+        json.push_str(",\n");
+        push_dependencies_json(&mut json, self);
         json.push_str(",\n");
         push_imports_json(&mut json, self);
         json.push_str(",\n");
@@ -389,6 +412,7 @@ pub struct ProjectSummary {
     pub entrypoint: Option<Address>,
     pub region_count: usize,
     pub section_count: usize,
+    pub dependency_count: usize,
     pub symbol_count: usize,
     pub import_count: usize,
     pub export_count: usize,
@@ -482,6 +506,19 @@ impl From<&Symbol> for ProjectSymbol {
         Self {
             name: symbol.name.clone(),
             address: symbol.address,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectDependency {
+    pub name: String,
+}
+
+impl From<&Dependency> for ProjectDependency {
+    fn from(dependency: &Dependency) -> Self {
+        Self {
+            name: dependency.name.clone(),
         }
     }
 }
@@ -696,6 +733,28 @@ fn push_symbols_json(json: &mut String, project: &Project) {
         json.push_str("    {\n");
         push_json_field(json, 6, "name", &symbol.name, true);
         push_json_address_field(json, 6, "address", symbol.address, false);
+        json.push_str("    }");
+        json.push_str(comma);
+        json.push('\n');
+    }
+    json.push_str("  ]");
+}
+
+fn push_dependencies_json(json: &mut String, project: &Project) {
+    json.push_str("  \"dependencies\": [");
+    if project.dependencies.is_empty() {
+        json.push(']');
+        return;
+    }
+    json.push('\n');
+    for (index, dependency) in project.dependencies.iter().enumerate() {
+        let comma = if index + 1 == project.dependencies.len() {
+            ""
+        } else {
+            ","
+        };
+        json.push_str("    {\n");
+        push_json_field(json, 6, "name", &dependency.name, false);
         json.push_str("    }");
         json.push_str(comma);
         json.push('\n');
@@ -1061,7 +1120,7 @@ mod tests {
         ArchitectureId, Diagnostic, DiagnosticSeverity, Endian, MemoryMap, MemoryRegion,
         Permissions,
     };
-    use kaiju_loader::{BinaryFormat, LoadedBinary};
+    use kaiju_loader::{BinaryFormat, Dependency, LoadedBinary};
     use std::path::PathBuf;
 
     #[test]
@@ -1115,6 +1174,28 @@ mod tests {
         assert!(json.contains("\"name\": \"ExitProcess\""));
         assert!(json.contains("\"ordinal\": 7"));
         assert!(json.contains("\"thunk\": \"0x00000001400020a8\""));
+    }
+
+    #[test]
+    fn creates_project_from_loaded_binary_and_preserves_dependencies() {
+        let mut binary = test_binary();
+        binary.dependencies.push(Dependency {
+            name: "libc.so.6".to_string(),
+        });
+        binary.dependencies.push(Dependency {
+            name: "libssl.so.3".to_string(),
+        });
+
+        let project = Project::from_loaded_binary(binary);
+
+        assert_eq!(project.dependencies().len(), 2);
+        assert_eq!(project.dependencies()[0].name, "libc.so.6");
+        assert_eq!(project.dependencies()[1].name, "libssl.so.3");
+        let json = project.to_json_pretty();
+        assert!(json.contains("\"dependencies\": 2"));
+        assert!(json.contains("\"dependencies\": ["));
+        assert!(json.contains("\"name\": \"libc.so.6\""));
+        assert!(json.contains("\"name\": \"libssl.so.3\""));
     }
 
     #[test]
@@ -1286,6 +1367,7 @@ mod tests {
         assert_eq!(summary.format, "Raw");
         assert_eq!(summary.architecture, "x86_64");
         assert_eq!(summary.region_count, 1);
+        assert_eq!(summary.dependency_count, 0);
         assert_eq!(summary.import_count, 0);
         assert_eq!(summary.export_count, 0);
         assert_eq!(summary.relocation_count, 0);
@@ -1341,6 +1423,8 @@ mod tests {
         assert!(json.contains("\"schema\": \"kaiju.project.v1\""));
         assert!(json.contains("\"format\": \"Raw\""));
         assert!(json.contains("\"architecture\": \"x86_64\""));
+        assert!(json.contains("\"dependencies\": 0"));
+        assert!(json.contains("\"dependencies\": []"));
         assert!(json.contains("kaiju \\\"json\\\""));
         assert!(json.contains("line\\nbreak"));
     }
@@ -1384,6 +1468,7 @@ mod tests {
             entrypoint: Some(Address::new(0x1000)),
             memory_map,
             sections: Vec::new(),
+            dependencies: Vec::new(),
             symbols: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),

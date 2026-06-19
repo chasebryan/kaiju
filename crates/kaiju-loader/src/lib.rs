@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,6 +42,7 @@ pub struct LoadedBinary {
     pub entrypoint: Option<Address>,
     pub memory_map: MemoryMap,
     pub sections: Vec<Section>,
+    pub dependencies: Vec<Dependency>,
     pub symbols: Vec<Symbol>,
     pub imports: Vec<Import>,
     pub exports: Vec<Export>,
@@ -56,6 +57,11 @@ pub struct Section {
     pub file_offset: Option<u64>,
     pub size: u64,
     pub permissions: Permissions,
+}
+
+#[derive(Debug, Clone)]
+pub struct Dependency {
+    pub name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -228,6 +234,7 @@ impl Loader for MachOLoader {
                     entrypoint,
                     memory_map,
                     sections,
+                    dependencies: commands.dependencies,
                     symbols: commands.symbols,
                     imports: commands.imports,
                     exports: Vec::new(),
@@ -255,6 +262,7 @@ impl Loader for PeLoader {
         let sections = parse_pe_sections(bytes, &header)?;
         let symbols = parse_pe_symbols(bytes, &header, &sections)?;
         let imports = parse_pe_imports(bytes, &header, &sections)?;
+        let dependencies = dependencies_from_imports(&imports);
         let exports = parse_pe_exports(bytes, &header, &sections)?;
         let relocations = parse_pe_relocations(bytes, &header, &sections)?;
         let mut memory_map = MemoryMap::new();
@@ -316,6 +324,7 @@ impl Loader for PeLoader {
                     permissions: section.permissions,
                 })
                 .collect(),
+            dependencies,
             symbols,
             imports,
             exports,
@@ -343,6 +352,7 @@ impl Loader for ElfLoader {
         let sections = parse_elf_sections(bytes, &header, &raw_sections)?;
         let elf_symbols = parse_elf_symbol_entries(bytes, &header, &raw_sections)?;
         let elf_relocations = parse_elf_relocation_entries(bytes, &header, &raw_sections)?;
+        let dependencies = parse_elf_dependencies(bytes, &header, &raw_sections)?;
         let symbols = elf_symbols
             .iter()
             .map(|symbol| Symbol {
@@ -416,6 +426,7 @@ impl Loader for ElfLoader {
             entrypoint: Some(Address::new(header.entrypoint)),
             memory_map,
             sections,
+            dependencies,
             symbols,
             imports,
             exports: Vec::new(),
@@ -451,6 +462,7 @@ const PT_LOAD: u32 = 1;
 const SHT_SYMTAB: u32 = 2;
 const SHT_STRTAB: u32 = 3;
 const SHT_RELA: u32 = 4;
+const SHT_DYNAMIC: u32 = 6;
 const SHT_NOBITS: u32 = 8;
 const SHT_REL: u32 = 9;
 const SHT_DYNSYM: u32 = 11;
@@ -461,6 +473,8 @@ const SHF_EXECINSTR: u64 = 0x4;
 const PF_X: u32 = 0x1;
 const PF_W: u32 = 0x2;
 const PF_R: u32 = 0x4;
+const DT_NULL: u64 = 0;
+const DT_NEEDED: u64 = 1;
 const EM_386: u16 = 3;
 const EM_ARM: u16 = 40;
 const EM_X86_64: u16 = 62;
@@ -512,6 +526,7 @@ const MACHO64_SECTION_SIZE: u64 = 80;
 const MACHO32_SYMBOL_SIZE: u64 = 12;
 const MACHO64_SYMBOL_SIZE: u64 = 16;
 const LC_SEGMENT: u32 = 0x1;
+const LC_LOAD_DYLIB: u32 = 0xc;
 const LC_SYMTAB: u32 = 0x2;
 const LC_SEGMENT_64: u32 = 0x19;
 const LC_MAIN: u32 = 0x8000_0028;
@@ -648,6 +663,7 @@ struct MachOHeader {
 #[derive(Debug, Default)]
 struct MachOCommands {
     segments: Vec<MachOSegment>,
+    dependencies: Vec<Dependency>,
     symbols: Vec<Symbol>,
     imports: Vec<Import>,
     entrypoint_file_offset: Option<u64>,
@@ -697,6 +713,7 @@ fn load_as_single_region(
         entrypoint: None,
         memory_map,
         sections: Vec::new(),
+        dependencies: Vec::new(),
         symbols: Vec::new(),
         imports: Vec::new(),
         exports: Vec::new(),
@@ -797,6 +814,14 @@ fn parse_mach_o_load_commands(bytes: &[u8], header: &MachOHeader) -> Result<Mach
                     "Mach-O LC_MAIN entryoff",
                 )?);
             }
+            LC_LOAD_DYLIB => {
+                commands.dependencies.push(parse_mach_o_dylib_command(
+                    bytes,
+                    command_offset,
+                    command_size,
+                    header.endian,
+                )?);
+            }
             LC_SYMTAB => {
                 if command_size < 24 {
                     return Err(malformed("Mach-O LC_SYMTAB command is too small"));
@@ -833,6 +858,31 @@ fn parse_mach_o_load_commands(bytes: &[u8], header: &MachOHeader) -> Result<Mach
     }
 
     Ok(commands)
+}
+
+fn parse_mach_o_dylib_command(
+    bytes: &[u8],
+    command_offset: u64,
+    command_size: u64,
+    endian: Endian,
+) -> Result<Dependency> {
+    if command_size < 24 {
+        return Err(malformed("Mach-O dylib command is too small"));
+    }
+    let name_offset = u64::from(read_u32(
+        bytes,
+        command_offset + 8,
+        endian,
+        "Mach-O dylib name offset",
+    )?);
+    if name_offset < 24 || name_offset >= command_size {
+        return Err(malformed("Mach-O dylib name offset is out of range"));
+    }
+    let name_start = checked_add_offset(command_offset, name_offset, "Mach-O dylib name")?;
+    let command_end = checked_add_offset(command_offset, command_size, "Mach-O dylib command")?;
+    let name = read_file_c_string(bytes, name_start, command_end, "Mach-O dylib name")?;
+
+    Ok(Dependency { name })
 }
 
 fn parse_mach_o_symbols(
@@ -2111,6 +2161,20 @@ fn pe_import_thunk_address(
     Ok(Some(Address::new(address)))
 }
 
+fn dependencies_from_imports(imports: &[Import]) -> Vec<Dependency> {
+    let mut seen = BTreeSet::new();
+    let mut dependencies = Vec::new();
+    for import in imports {
+        if import.library.is_empty() || !seen.insert(import.library.clone()) {
+            continue;
+        }
+        dependencies.push(Dependency {
+            name: import.library.clone(),
+        });
+    }
+    dependencies
+}
+
 fn read_pe_import_name(bytes: &[u8], sections: &[PeSection], name_rva: u64) -> Result<String> {
     let location = pe_rva_to_file_location(name_rva, sections)
         .ok_or_else(|| malformed("PE import name RVA does not map to file data"))?;
@@ -2614,6 +2678,98 @@ fn parse_elf_relocation_entries(
     Ok(relocations)
 }
 
+fn parse_elf_dependencies(
+    bytes: &[u8],
+    header: &ElfHeader,
+    raw_sections: &[ElfSectionHeader],
+) -> Result<Vec<Dependency>> {
+    let mut dependencies = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for section in raw_sections
+        .iter()
+        .filter(|section| section.section_type == SHT_DYNAMIC)
+    {
+        if section.size == 0 {
+            continue;
+        }
+
+        let minimum_entry_size = elf_dynamic_entry_size(header.class);
+        if section.entry_size < minimum_entry_size {
+            return Err(malformed("ELF dynamic table entry size is too small"));
+        }
+        if section.size % section.entry_size != 0 {
+            return Err(malformed(
+                "ELF dynamic table size is not a multiple of entry size",
+            ));
+        }
+
+        let link_index = usize::try_from(section.link)
+            .map_err(|_| malformed("ELF dynamic string table index does not fit in usize"))?;
+        let Some(string_section) = raw_sections.get(link_index) else {
+            return Err(malformed("ELF dynamic string table index is out of range"));
+        };
+        if string_section.section_type != SHT_STRTAB {
+            return Err(malformed("ELF dynamic table link does not point to STRTAB"));
+        }
+        if string_section.size == 0 {
+            continue;
+        }
+
+        let string_table = checked_range(
+            bytes,
+            string_section.offset,
+            string_section.size,
+            "ELF dynamic string table",
+        )?;
+        checked_range(bytes, section.offset, section.size, "ELF dynamic table")?;
+        let entry_count = section.size / section.entry_size;
+        for index in 0..entry_count {
+            let base = section
+                .offset
+                .checked_add(
+                    index
+                        .checked_mul(section.entry_size)
+                        .ok_or_else(|| malformed("ELF dynamic table offset overflow"))?,
+                )
+                .ok_or_else(|| malformed("ELF dynamic table offset overflow"))?;
+            let (tag, value) = match header.class {
+                ElfClass::Elf32 => (
+                    u64::from(read_u32(bytes, base, header.endian, "ELF dynamic tag")?),
+                    u64::from(read_u32(
+                        bytes,
+                        base + 4,
+                        header.endian,
+                        "ELF dynamic value",
+                    )?),
+                ),
+                ElfClass::Elf64 => (
+                    read_u64(bytes, base, header.endian, "ELF dynamic tag")?,
+                    read_u64(bytes, base + 8, header.endian, "ELF dynamic value")?,
+                ),
+            };
+
+            if tag == DT_NULL {
+                break;
+            }
+            if tag != DT_NEEDED {
+                continue;
+            }
+            let name_offset = u32::try_from(value)
+                .map_err(|_| malformed("ELF needed library offset does not fit in u32"))?;
+            let Some(name) = string_table_name(string_table, name_offset, "ELF needed library")?
+            else {
+                return Err(malformed("ELF needed library name is empty"));
+            };
+            if seen.insert(name.clone()) {
+                dependencies.push(Dependency { name });
+            }
+        }
+    }
+
+    Ok(dependencies)
+}
+
 fn elf_imports_from_symbols(
     symbols: &[ElfSymbolEntry],
     relocations: &[ElfRelocationEntry],
@@ -2652,6 +2808,13 @@ fn elf_relocation_entry_size(class: ElfClass, is_rela: bool) -> u64 {
         (ElfClass::Elf32, true) => 12,
         (ElfClass::Elf64, false) => 16,
         (ElfClass::Elf64, true) => 24,
+    }
+}
+
+fn elf_dynamic_entry_size(class: ElfClass) -> u64 {
+    match class {
+        ElfClass::Elf32 => 8,
+        ElfClass::Elf64 => 16,
     }
 }
 
@@ -3135,6 +3298,8 @@ mod tests {
         let binary = load_bytes(PathBuf::from("sample.exe"), &bytes).expect("load PE");
 
         assert_eq!(binary.format, BinaryFormat::Pe);
+        assert_eq!(binary.dependencies.len(), 1);
+        assert_eq!(binary.dependencies[0].name, "KERNEL32.dll");
         assert_eq!(binary.imports.len(), 2);
         assert_eq!(binary.imports[0].library, "KERNEL32.dll");
         assert_eq!(binary.imports[0].name.as_deref(), Some("ExitProcess"));
@@ -3240,6 +3405,7 @@ mod tests {
             Some(0x103)
         );
         assert!(binary.symbols.is_empty());
+        assert!(binary.dependencies.is_empty());
         assert!(binary.imports.is_empty());
         assert!(binary.diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Note
@@ -3263,6 +3429,16 @@ mod tests {
         assert_eq!(binary.imports[0].name.as_deref(), Some("_puts"));
         assert_eq!(binary.imports[0].ordinal, None);
         assert_eq!(binary.imports[0].thunk, None);
+    }
+
+    #[test]
+    fn loads_mach_o64_dylib_dependencies() {
+        let bytes = synthetic_mach_o64_le_with_dylib();
+        let binary = load_bytes(PathBuf::from("sample.macho"), &bytes).expect("load Mach-O");
+
+        assert_eq!(binary.format, BinaryFormat::MachO);
+        assert_eq!(binary.dependencies.len(), 1);
+        assert_eq!(binary.dependencies[0].name, "libSystem.B.dylib");
     }
 
     #[test]
@@ -3365,6 +3541,8 @@ mod tests {
         assert!(binary.symbols.iter().any(|symbol| {
             symbol.name == "printf" && symbol.address == Some(Address::new(0x401000))
         }));
+        assert_eq!(binary.dependencies.len(), 1);
+        assert_eq!(binary.dependencies[0].name, "libc.so.6");
         assert_eq!(binary.imports.len(), 1);
         assert_eq!(binary.imports[0].library, "ELF");
         assert_eq!(binary.imports[0].name.as_deref(), Some("puts"));
@@ -3409,6 +3587,30 @@ mod tests {
         let mut bytes = synthetic_mach_o64_le_with_symbols();
         let symtab = mach_o64_symtab_command_offset();
         write_u32_le(&mut bytes, symtab + 4, 16);
+
+        let error =
+            load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn mach_o_tiny_dylib_command_returns_clean_error() {
+        let mut bytes = synthetic_mach_o64_le_with_dylib();
+        let dylib = mach_o64_dylib_command_offset();
+        write_u32_le(&mut bytes, dylib + 4, 16);
+
+        let error =
+            load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn mach_o_dylib_name_outside_command_returns_clean_error() {
+        let mut bytes = synthetic_mach_o64_le_with_dylib();
+        let dylib = mach_o64_dylib_command_offset();
+        write_u32_le(&mut bytes, dylib + 8, 0x80);
 
         let error =
             load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
@@ -3512,6 +3714,39 @@ mod tests {
 
         let error =
             load_bytes(PathBuf::from("bad.elf"), &bytes).expect_err("bad relocation should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn elf_dynamic_table_bad_link_returns_clean_error() {
+        let mut bytes = synthetic_elf64_le_with_imports_and_relocations();
+        write_u32_le(&mut bytes, 0x100 + (6 * 64) + 40, 99);
+
+        let error =
+            load_bytes(PathBuf::from("bad.elf"), &bytes).expect_err("bad dynamic should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn elf_dynamic_table_bad_entry_size_returns_clean_error() {
+        let mut bytes = synthetic_elf64_le_with_imports_and_relocations();
+        write_u64_le(&mut bytes, 0x100 + (6 * 64) + 56, 8);
+
+        let error =
+            load_bytes(PathBuf::from("bad.elf"), &bytes).expect_err("bad dynamic should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn elf_needed_name_outside_string_table_returns_clean_error() {
+        let mut bytes = synthetic_elf64_le_with_imports_and_relocations();
+        write_u64_le(&mut bytes, 0x480 + 8, 0x400);
+
+        let error =
+            load_bytes(PathBuf::from("bad.elf"), &bytes).expect_err("bad dynamic should fail");
 
         assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
     }
@@ -4016,7 +4251,30 @@ mod tests {
         bytes
     }
 
+    fn synthetic_mach_o64_le_with_dylib() -> Vec<u8> {
+        let mut bytes = synthetic_mach_o64_le();
+
+        let segment_command_size = MACHO64_SEGMENT_COMMAND_SIZE + MACHO64_SECTION_SIZE;
+        let command_size = segment_command_size + 24 + 48;
+        let dylib = mach_o64_dylib_command_offset();
+
+        write_u32_le(&mut bytes, 16, 3);
+        write_u32_le(&mut bytes, 20, command_size as u32);
+        write_u32_le(&mut bytes, dylib, LC_LOAD_DYLIB);
+        write_u32_le(&mut bytes, dylib + 4, 48);
+        write_u32_le(&mut bytes, dylib + 8, 24);
+        bytes[dylib + 24..dylib + 42].copy_from_slice(b"libSystem.B.dylib\0");
+
+        bytes
+    }
+
     fn mach_o64_symtab_command_offset() -> usize {
+        MACHO64_HEADER_SIZE as usize
+            + (MACHO64_SEGMENT_COMMAND_SIZE + MACHO64_SECTION_SIZE) as usize
+            + 24
+    }
+
+    fn mach_o64_dylib_command_offset() -> usize {
         MACHO64_HEADER_SIZE as usize
             + (MACHO64_SEGMENT_COMMAND_SIZE + MACHO64_SECTION_SIZE) as usize
             + 24
@@ -4149,7 +4407,7 @@ mod tests {
         write_u16_le(&mut bytes, 54, 56);
         write_u16_le(&mut bytes, 56, 1);
         write_u16_le(&mut bytes, 58, 64);
-        write_u16_le(&mut bytes, 60, 6);
+        write_u16_le(&mut bytes, 60, 7);
         write_u16_le(&mut bytes, 62, 2);
 
         write_u32_le(&mut bytes, 0x40, PT_LOAD);
@@ -4183,7 +4441,7 @@ mod tests {
                 flags: 0,
                 address: 0,
                 file_offset: 0x340,
-                size: 43,
+                size: 52,
                 link: 0,
                 entry_size: 0,
             },
@@ -4197,7 +4455,7 @@ mod tests {
                 flags: 0,
                 address: 0,
                 file_offset: 0x390,
-                size: 13,
+                size: 23,
                 link: 0,
                 entry_size: 0,
             },
@@ -4230,14 +4488,32 @@ mod tests {
                 entry_size: 24,
             },
         );
+        write_section64(
+            &mut bytes,
+            0x100 + 384,
+            Section64Spec {
+                name: 43,
+                section_type: SHT_DYNAMIC,
+                flags: 0,
+                address: 0,
+                file_offset: 0x480,
+                size: 32,
+                link: 3,
+                entry_size: 16,
+            },
+        );
 
         bytes[0x300..0x304].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
-        bytes[0x340..0x36b].copy_from_slice(b"\0.text\0.shstrtab\0.dynstr\0.dynsym\0.rela.plt\0");
-        bytes[0x390..0x39d].copy_from_slice(b"\0puts\0printf\0");
+        bytes[0x340..0x374]
+            .copy_from_slice(b"\0.text\0.shstrtab\0.dynstr\0.dynsym\0.rela.plt\0.dynamic\0");
+        bytes[0x390..0x3a7].copy_from_slice(b"\0puts\0printf\0libc.so.6\0");
         write_elf64_symbol(&mut bytes, 0x3c0 + 24, 1, 0x12, SHN_UNDEF, 0, 0);
         write_elf64_symbol(&mut bytes, 0x3c0 + 48, 6, 0x12, 1, 0x401000, 0);
         write_elf64_rela(&mut bytes, 0x420, 0x402000, 1, 7, 0);
         write_elf64_rela(&mut bytes, 0x420 + 24, 0x402008, 0, 8, 0x401000);
+        write_u64_le(&mut bytes, 0x480, DT_NEEDED);
+        write_u64_le(&mut bytes, 0x488, 13);
+        write_u64_le(&mut bytes, 0x490, DT_NULL);
 
         bytes
     }

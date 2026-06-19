@@ -11,6 +11,7 @@
   "summary": {
     "regions": 1,
     "sections": 0,
+    "dependencies": 0,
     "symbols": 0,
     "imports": 0,
     "exports": 0,
@@ -31,6 +32,7 @@
     }
   ],
   "symbols": [],
+  "dependencies": [],
   "imports": [],
   "exports": [],
   "relocations": [],

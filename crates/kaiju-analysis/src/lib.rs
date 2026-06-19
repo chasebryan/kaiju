@@ -708,6 +708,7 @@ mod tests {
                 map
             },
             sections: Vec::new(),
+            dependencies: Vec::new(),
             symbols: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
@@ -901,6 +902,7 @@ mod tests {
             entrypoint: Some(base),
             memory_map,
             sections: Vec::new(),
+            dependencies: Vec::new(),
             symbols: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),

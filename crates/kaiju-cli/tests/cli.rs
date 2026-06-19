@@ -1,7 +1,11 @@
 use std::fs;
+use std::io::{ErrorKind, Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const RAW_FIXTURE_TOKEN: &str = "<RAW_FIXTURE>";
@@ -36,6 +40,7 @@ fn cli_info_reports_raw_fixture() {
     assert!(stdout.contains("Entrypoint: None"));
     assert!(stdout.contains("Regions: 1"));
     assert!(stdout.contains("Sections: 0"));
+    assert!(stdout.contains("Dependencies: 0"));
     assert!(stdout.contains("Symbols: 0"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
@@ -89,6 +94,7 @@ fn cli_reports_elf_metadata_and_load_map() {
     assert!(stdout.contains("Endian: Little"));
     assert!(stdout.contains("Entrypoint: 0x0000000000401000"));
     assert!(stdout.contains("Regions: 1"));
+    assert!(stdout.contains("Dependencies: 0"));
     assert!(stdout.contains("Symbols: 1"));
 
     let map = Command::new(env!("CARGO_BIN_EXE_kaiju"))
@@ -122,6 +128,7 @@ fn cli_reports_pe_metadata_and_section_map() {
     assert!(stdout.contains("Entrypoint: 0x0000000140001000"));
     assert!(stdout.contains("Regions: 1"));
     assert!(stdout.contains("Sections: 1"));
+    assert!(stdout.contains("Dependencies: 0"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
     assert!(stdout.contains("Relocations: 0"));
@@ -179,6 +186,24 @@ fn cli_imports_reports_elf_imports() {
     assert!(stdout.contains("ELF"));
     assert!(stdout.contains("puts"));
     assert!(stdout.contains("0x0000000000402000"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn cli_dependencies_reports_elf_needed_libraries() {
+    let path = write_temp_elf_dynamic_fixture();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("dependencies")
+        .arg(&path)
+        .output()
+        .expect("run kaiju dependencies on ELF");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Name"));
+    assert!(stdout.contains("libc.so.6"));
 
     let _ = fs::remove_file(path);
 }
@@ -245,6 +270,24 @@ fn cli_imports_reports_pe_imports() {
     assert!(stdout.contains("7"));
     assert!(stdout.contains("0x00000001400020a0"));
     assert!(stdout.contains("0x00000001400020a8"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn cli_dependencies_reports_pe_import_dlls() {
+    let path = write_temp_pe_import_fixture();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("dependencies")
+        .arg(&path)
+        .output()
+        .expect("run kaiju dependencies on PE");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Name"));
+    assert!(stdout.contains("KERNEL32.dll"));
 
     let _ = fs::remove_file(path);
 }
@@ -325,6 +368,24 @@ fn cli_imports_reports_mach_o_imports() {
     assert!(stdout.contains("Library  Name  Ordinal  Thunk"));
     assert!(stdout.contains("Mach-O"));
     assert!(stdout.contains("_puts"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn cli_dependencies_reports_mach_o_dylibs() {
+    let path = write_temp_mach_o_dylib_fixture();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("dependencies")
+        .arg(&path)
+        .output()
+        .expect("run kaiju dependencies on Mach-O");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Name"));
+    assert!(stdout.contains("libSystem.B.dylib"));
 
     let _ = fs::remove_file(path);
 }
@@ -493,6 +554,7 @@ fn cli_analyze_reports_project_summary() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
     assert!(stdout.contains("Passes: 4"));
+    assert!(stdout.contains("Dependencies: 0"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
     assert!(stdout.contains("Relocations: 0"));
@@ -515,6 +577,7 @@ fn cli_analyze_raw_fixture_succeeds_with_warnings() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
     assert!(stdout.contains("Passes: 4"));
+    assert!(stdout.contains("Dependencies: 0"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
     assert!(stdout.contains("Relocations: 0"));
@@ -535,6 +598,7 @@ fn cli_export_reports_project_json() {
     assert!(stdout.contains("\"schema\": \"kaiju.project.v1\""));
     assert!(stdout.contains("\"format\": \"Raw\""));
     assert!(stdout.contains("\"diagnostics\": 1"));
+    assert!(stdout.contains("\"dependencies\": 0"));
     assert!(stdout.contains("\"severity\": \"note\""));
     assert!(stdout.contains("\"strings\": 1"));
     assert!(stdout.contains("Kaiju raw fixture"));
@@ -596,6 +660,19 @@ fn cli_symbols_reports_pe_coff_symbols() {
     assert!(stdout.contains("0x0000000140001004"));
 
     let _ = fs::remove_file(path);
+}
+
+#[test]
+fn cli_dependencies_reports_header_for_files_without_dependencies() {
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("dependencies")
+        .arg(fixture_path("raw.bin"))
+        .output()
+        .expect("run kaiju dependencies");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert_eq!(stdout.trim_end(), "Name");
 }
 
 #[test]
@@ -727,6 +804,108 @@ fn cli_network_supports_json_and_dot_outputs() {
 }
 
 #[test]
+fn cli_network_probe_opens_socket_and_inspects_payload() {
+    let Some(listener) = bind_loopback_listener() else {
+        return;
+    };
+    let port = listener
+        .local_addr()
+        .expect("listener local address")
+        .port();
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept probe");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("set read timeout");
+        let mut buffer = [0_u8; 16];
+        let _ = stream.read(&mut buffer);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nkaiju")
+            .expect("write probe response");
+    });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("network")
+        .arg("probe")
+        .arg("--target")
+        .arg(format!("127.0.0.1:{port}"))
+        .arg("--send-text")
+        .arg("ping")
+        .arg("--read-bytes")
+        .arg("128")
+        .arg("--timeout-ms")
+        .arg("1000")
+        .output()
+        .expect("run kaiju network probe");
+
+    handle.join().expect("probe listener thread");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Mode: probe"));
+    assert!(stdout.contains("Open: 1"));
+    assert!(stdout.contains("open"));
+    assert!(stdout.contains("http"));
+    assert!(stdout.contains("HTTP/1.1 200 OK"));
+}
+
+#[test]
+fn cli_network_scan_reports_local_open_port() {
+    let Some(listener) = bind_loopback_listener() else {
+        return;
+    };
+    let port = listener
+        .local_addr()
+        .expect("listener local address")
+        .port();
+    let handle = thread::spawn(move || {
+        let _ = listener.accept().expect("accept scan");
+    });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("network")
+        .arg("scan")
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--ports")
+        .arg(port.to_string())
+        .arg("--timeout-ms")
+        .arg("1000")
+        .output()
+        .expect("run kaiju network scan");
+
+    handle.join().expect("scan listener thread");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Mode: scan"));
+    assert!(stdout.contains("Open: 1"));
+    assert!(stdout.contains(&format!("127.0.0.1:{port}")));
+}
+
+#[test]
+fn cli_network_pcap_imports_packet_payloads() {
+    let path = write_temp_pcap_fixture();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("network")
+        .arg("pcap")
+        .arg(&path)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("run kaiju network pcap");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("\"schema\": \"kaiju.network.v1\""));
+    assert!(stdout.contains("\"source\": \"10.0.0.4\""));
+    assert!(stdout.contains("\"destination\": \"10.0.0.8\""));
+    assert!(stdout.contains("\"kind\": \"http\""));
+    assert!(stdout.contains("GET / HTTP/1.1"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn cli_raw_fixture_snapshots_match() {
     assert_raw_snapshot(&["info", RAW_FIXTURE_TOKEN], "raw-info.txt");
     assert_raw_snapshot(&["map", RAW_FIXTURE_TOKEN], "raw-map.txt");
@@ -734,6 +913,7 @@ fn cli_raw_fixture_snapshots_match() {
     assert_raw_snapshot(&["strings", RAW_FIXTURE_TOKEN], "raw-strings.txt");
     assert_raw_snapshot(&["analyze", RAW_FIXTURE_TOKEN], "raw-analyze.txt");
     assert_raw_snapshot(&["export", RAW_FIXTURE_TOKEN], "raw-export.json");
+    assert_raw_snapshot(&["dependencies", RAW_FIXTURE_TOKEN], "raw-dependencies.txt");
     assert_raw_snapshot(&["imports", RAW_FIXTURE_TOKEN], "raw-imports.txt");
     assert_raw_snapshot(&["exports", RAW_FIXTURE_TOKEN], "raw-exports.txt");
     assert_raw_snapshot(&["relocations", RAW_FIXTURE_TOKEN], "raw-relocations.txt");
@@ -749,6 +929,14 @@ fn cli_arch_snapshot_matches() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
     assert_eq!(stdout.trim_end(), snapshot("arch.txt"));
+}
+
+fn bind_loopback_listener() -> Option<TcpListener> {
+    match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => Some(listener),
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => None,
+        Err(error) => panic!("bind local listener: {error}"),
+    }
 }
 
 fn write_temp_elf_fixture() -> PathBuf {
@@ -871,6 +1059,19 @@ fn write_temp_mach_o_symbol_fixture() -> PathBuf {
     path
 }
 
+fn write_temp_mach_o_dylib_fixture() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "kaiju-cli-macho-dylib-{}-{unique}.bin",
+        process::id()
+    ));
+    fs::write(&path, synthetic_mach_o64_le_with_dylib()).expect("write Mach-O dylib fixture");
+    path
+}
+
 fn write_temp_strings_fixture() -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -879,6 +1080,16 @@ fn write_temp_strings_fixture() -> PathBuf {
     let path =
         std::env::temp_dir().join(format!("kaiju-cli-strings-{}-{unique}.bin", process::id()));
     fs::write(&path, strings_fixture_bytes()).expect("write strings fixture");
+    path
+}
+
+fn write_temp_pcap_fixture() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("kaiju-cli-pcap-{}-{unique}.pcap", process::id()));
+    fs::write(&path, synthetic_pcap_tcp_http()).expect("write pcap fixture");
     path
 }
 
@@ -1008,7 +1219,7 @@ fn synthetic_elf64_le_with_imports_and_relocations() -> Vec<u8> {
     write_u16_le(&mut bytes, 54, 56);
     write_u16_le(&mut bytes, 56, 1);
     write_u16_le(&mut bytes, 58, 64);
-    write_u16_le(&mut bytes, 60, 6);
+    write_u16_le(&mut bytes, 60, 7);
     write_u16_le(&mut bytes, 62, 2);
 
     write_u32_le(&mut bytes, 0x40, 1);
@@ -1042,7 +1253,7 @@ fn synthetic_elf64_le_with_imports_and_relocations() -> Vec<u8> {
             flags: 0,
             address: 0,
             file_offset: 0x340,
-            size: 43,
+            size: 52,
             link: 0,
             entry_size: 0,
         },
@@ -1056,7 +1267,7 @@ fn synthetic_elf64_le_with_imports_and_relocations() -> Vec<u8> {
             flags: 0,
             address: 0,
             file_offset: 0x390,
-            size: 13,
+            size: 23,
             link: 0,
             entry_size: 0,
         },
@@ -1089,14 +1300,32 @@ fn synthetic_elf64_le_with_imports_and_relocations() -> Vec<u8> {
             entry_size: 24,
         },
     );
+    write_elf_section64(
+        &mut bytes,
+        0x100 + 384,
+        ElfSection64Spec {
+            name: 43,
+            section_type: 6,
+            flags: 0,
+            address: 0,
+            file_offset: 0x480,
+            size: 32,
+            link: 3,
+            entry_size: 16,
+        },
+    );
 
     bytes[0x300..0x304].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
-    bytes[0x340..0x36b].copy_from_slice(b"\0.text\0.shstrtab\0.dynstr\0.dynsym\0.rela.plt\0");
-    bytes[0x390..0x39d].copy_from_slice(b"\0puts\0printf\0");
+    bytes[0x340..0x374]
+        .copy_from_slice(b"\0.text\0.shstrtab\0.dynstr\0.dynsym\0.rela.plt\0.dynamic\0");
+    bytes[0x390..0x3a7].copy_from_slice(b"\0puts\0printf\0libc.so.6\0");
     write_elf64_symbol(&mut bytes, 0x3c0 + 24, 1, 0x12, 0, 0, 0);
     write_elf64_symbol(&mut bytes, 0x3c0 + 48, 6, 0x12, 1, 0x401000, 0);
     write_elf64_rela(&mut bytes, 0x420, 0x402000, 1, 7, 0);
     write_elf64_rela(&mut bytes, 0x420 + 24, 0x402008, 0, 8, 0x401000);
+    write_u64_le(&mut bytes, 0x480, 1);
+    write_u64_le(&mut bytes, 0x488, 13);
+    write_u64_le(&mut bytes, 0x490, 0);
 
     bytes
 }
@@ -1479,7 +1708,36 @@ fn synthetic_mach_o64_le_with_symbols() -> Vec<u8> {
     bytes
 }
 
+fn synthetic_mach_o64_le_with_dylib() -> Vec<u8> {
+    const MACHO64_SEGMENT_COMMAND_SIZE: usize = 72;
+    const MACHO64_SECTION_SIZE: usize = 80;
+    const LC_LOAD_DYLIB: u32 = 0xc;
+
+    let mut bytes = synthetic_mach_o64_le();
+
+    let segment_command_size = MACHO64_SEGMENT_COMMAND_SIZE + MACHO64_SECTION_SIZE;
+    let command_size = segment_command_size + 24 + 48;
+    let dylib = mach_o64_dylib_command_offset();
+
+    write_u32_le(&mut bytes, 16, 3);
+    write_u32_le(&mut bytes, 20, command_size as u32);
+    write_u32_le(&mut bytes, dylib, LC_LOAD_DYLIB);
+    write_u32_le(&mut bytes, dylib + 4, 48);
+    write_u32_le(&mut bytes, dylib + 8, 24);
+    bytes[dylib + 24..dylib + 42].copy_from_slice(b"libSystem.B.dylib\0");
+
+    bytes
+}
+
 fn mach_o64_symtab_command_offset() -> usize {
+    const MACHO64_HEADER_SIZE: usize = 32;
+    const MACHO64_SEGMENT_COMMAND_SIZE: usize = 72;
+    const MACHO64_SECTION_SIZE: usize = 80;
+
+    MACHO64_HEADER_SIZE + MACHO64_SEGMENT_COMMAND_SIZE + MACHO64_SECTION_SIZE + 24
+}
+
+fn mach_o64_dylib_command_offset() -> usize {
     const MACHO64_HEADER_SIZE: usize = 32;
     const MACHO64_SEGMENT_COMMAND_SIZE: usize = 72;
     const MACHO64_SECTION_SIZE: usize = 80;
@@ -1506,6 +1764,54 @@ fn write_mach_o64_symbol(
 fn strings_fixture_bytes() -> Vec<u8> {
     let mut bytes = b"\0abc\0kaiju\0monster-class\0".to_vec();
     bytes.extend_from_slice(&[b'W', 0, b'i', 0, b'd', 0, b'e', 0, 0, 0]);
+    bytes
+}
+
+fn synthetic_pcap_tcp_http() -> Vec<u8> {
+    let payload = b"GET / HTTP/1.1\r\n\r\n";
+    let tcp_len = 20 + payload.len();
+    let ip_total_len = 20 + tcp_len;
+    let frame_len = 14 + ip_total_len;
+    let mut bytes = Vec::new();
+
+    bytes.extend_from_slice(&[0xd4, 0xc3, 0xb2, 0xa1]);
+    bytes.extend_from_slice(&2_u16.to_le_bytes());
+    bytes.extend_from_slice(&4_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_i32.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&65_535_u32.to_le_bytes());
+    bytes.extend_from_slice(&1_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&(frame_len as u32).to_le_bytes());
+    bytes.extend_from_slice(&(frame_len as u32).to_le_bytes());
+
+    bytes.extend_from_slice(&[0, 1, 2, 3, 4, 5]);
+    bytes.extend_from_slice(&[6, 7, 8, 9, 10, 11]);
+    bytes.extend_from_slice(&0x0800_u16.to_be_bytes());
+
+    bytes.push(0x45);
+    bytes.push(0);
+    bytes.extend_from_slice(&(ip_total_len as u16).to_be_bytes());
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
+    bytes.push(64);
+    bytes.push(6);
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
+    bytes.extend_from_slice(&[10, 0, 0, 4]);
+    bytes.extend_from_slice(&[10, 0, 0, 8]);
+
+    bytes.extend_from_slice(&51_110_u16.to_be_bytes());
+    bytes.extend_from_slice(&80_u16.to_be_bytes());
+    bytes.extend_from_slice(&0_u32.to_be_bytes());
+    bytes.extend_from_slice(&0_u32.to_be_bytes());
+    bytes.push(0x50);
+    bytes.push(0x18);
+    bytes.extend_from_slice(&1024_u16.to_be_bytes());
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
+    bytes.extend_from_slice(&0_u16.to_be_bytes());
+    bytes.extend_from_slice(payload);
+
     bytes
 }
 

@@ -245,6 +245,7 @@ mod tests {
             entrypoint: None,
             memory_map,
             sections: Vec::new(),
+            dependencies: Vec::new(),
             symbols: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),

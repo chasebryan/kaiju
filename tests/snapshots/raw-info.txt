@@ -6,6 +6,7 @@ Endian: Unknown
 Entrypoint: None
 Regions: 1
 Sections: 0
+Dependencies: 0
 Symbols: 0
 Imports: 0
 Exports: 0

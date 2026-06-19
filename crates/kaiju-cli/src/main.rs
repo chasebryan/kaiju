@@ -13,7 +13,11 @@ use kaiju_core::{Address, DiagnosticSeverity, KaijuError, KaijuErrorKind, Result
 use kaiju_disasm::{disassembler_for_architecture, Disassembler, Instruction};
 use kaiju_ir::{lift_instructions, IrFunction};
 use kaiju_loader::{load_path, LoadedBinary};
-use kaiju_network::{load_network_evidence, NetworkEdge, NetworkMap, NetworkProtocol};
+use kaiju_network::{
+    load_network_evidence, load_pcap_evidence, parse_hex_payload, parse_port_spec,
+    parse_probe_target, probe_targets, scan_ports, NetworkEdge, NetworkMap, NetworkProtocol,
+    ProbeOptions, ProbeReport,
+};
 use kaiju_project::{CrossReferenceKind, Project};
 
 const DEFAULT_MIN_STRING_LEN: usize = 4;
@@ -128,6 +132,12 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), CliError> {
             print_symbols(&binary);
             Ok(())
         }
+        "dependencies" => {
+            let path = read_single_path_arg(&mut args, "dependencies")?;
+            let binary = load_path(path)?;
+            print_dependencies(&binary);
+            Ok(())
+        }
         "imports" => {
             let path = read_single_path_arg(&mut args, "imports")?;
             let binary = load_path(path)?;
@@ -154,8 +164,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), CliError> {
         }
         "network" => {
             let args = read_network_args(&mut args)?;
-            let network = load_network_evidence(&args.path)?;
-            print_network(&network, args.format);
+            run_network(args)?;
             Ok(())
         }
         "arch" => {
@@ -432,9 +441,47 @@ fn read_lift_args(args: &mut impl Iterator<Item = String>) -> Result<LiftArgs, C
     })
 }
 
-fn read_network_args(args: &mut impl Iterator<Item = String>) -> Result<NetworkArgs, CliError> {
+fn read_network_args(args: &mut impl Iterator<Item = String>) -> Result<NetworkCommand, CliError> {
+    let Some(first) = args.next() else {
+        return Err(CliError::Usage(
+            "missing network evidence path or subcommand".to_string(),
+        ));
+    };
+
+    match first.as_str() {
+        "evidence" => read_network_map_args(args, "network evidence", None).map(|args| {
+            NetworkCommand::Evidence {
+                path: args.path,
+                format: args.format,
+            }
+        }),
+        "pcap" => {
+            read_network_map_args(args, "network pcap", None).map(|args| NetworkCommand::Pcap {
+                path: args.path,
+                format: args.format,
+            })
+        }
+        "probe" => read_network_probe_args(args),
+        "scan" => read_network_scan_args(args),
+        _ => read_network_map_args(args, "network", Some(PathBuf::from(first))).map(|args| {
+            NetworkCommand::Evidence {
+                path: args.path,
+                format: args.format,
+            }
+        }),
+    }
+}
+
+fn read_network_map_args(
+    args: &mut impl Iterator<Item = String>,
+    command: &str,
+    initial_path: Option<PathBuf>,
+) -> Result<NetworkMapArgs, CliError> {
     let mut path = None;
     let mut format = NetworkOutputFormat::Text;
+    if let Some(initial_path) = initial_path {
+        path = Some(initial_path);
+    }
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -449,19 +496,189 @@ fn read_network_args(args: &mut impl Iterator<Item = String>) -> Result<NetworkA
             _ if path.is_none() => path = Some(PathBuf::from(arg)),
             _ => {
                 return Err(CliError::Usage(format!(
-                    "unexpected extra argument for network: {arg}"
+                    "unexpected extra argument for {command}: {arg}"
                 )))
             }
         }
     }
 
     let Some(path) = path else {
+        return Err(CliError::Usage(format!("missing path for {command}")));
+    };
+
+    Ok(NetworkMapArgs { path, format })
+}
+
+fn read_network_probe_args(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<NetworkCommand, CliError> {
+    let mut targets = Vec::new();
+    let mut options = ProbeOptions::default();
+    let mut format = NetworkProbeOutputFormat::Text;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--target" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage(
+                        "missing value for network probe --target".to_string(),
+                    ));
+                };
+                let target = parse_probe_target(&value).ok_or_else(|| {
+                    CliError::Usage(format!("invalid network probe target: {value}"))
+                })?;
+                targets.push(target);
+            }
+            "--timeout-ms" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage(
+                        "missing value for network probe --timeout-ms".to_string(),
+                    ));
+                };
+                options.timeout_ms = parse_positive_u64(&value, "network probe --timeout-ms")?;
+            }
+            "--read-bytes" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage(
+                        "missing value for network probe --read-bytes".to_string(),
+                    ));
+                };
+                options.read_bytes = parse_usize(&value, "network probe --read-bytes")?;
+            }
+            "--send-text" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage(
+                        "missing value for network probe --send-text".to_string(),
+                    ));
+                };
+                options.payload = value.into_bytes();
+            }
+            "--send-hex" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage(
+                        "missing value for network probe --send-hex".to_string(),
+                    ));
+                };
+                options.payload = parse_hex_payload(&value)?;
+            }
+            "--format" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage(
+                        "missing value for network probe --format".to_string(),
+                    ));
+                };
+                format = parse_network_probe_format(&value)?;
+            }
+            _ => {
+                let target = parse_probe_target(&arg).ok_or_else(|| {
+                    CliError::Usage(format!("invalid network probe argument: {arg}"))
+                })?;
+                targets.push(target);
+            }
+        }
+    }
+
+    Ok(NetworkCommand::Probe {
+        targets,
+        options,
+        format,
+    })
+}
+
+fn read_network_scan_args(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<NetworkCommand, CliError> {
+    let mut host = None;
+    let mut ports = None;
+    let mut options = ProbeOptions {
+        read_bytes: 0,
+        ..ProbeOptions::default()
+    };
+    let mut format = NetworkProbeOutputFormat::Text;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--host" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage(
+                        "missing value for network scan --host".to_string(),
+                    ));
+                };
+                host = Some(value);
+            }
+            "--ports" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage(
+                        "missing value for network scan --ports".to_string(),
+                    ));
+                };
+                ports = Some(parse_port_spec(&value)?);
+            }
+            "--timeout-ms" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage(
+                        "missing value for network scan --timeout-ms".to_string(),
+                    ));
+                };
+                options.timeout_ms = parse_positive_u64(&value, "network scan --timeout-ms")?;
+            }
+            "--read-bytes" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage(
+                        "missing value for network scan --read-bytes".to_string(),
+                    ));
+                };
+                options.read_bytes = parse_usize(&value, "network scan --read-bytes")?;
+            }
+            "--send-text" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage(
+                        "missing value for network scan --send-text".to_string(),
+                    ));
+                };
+                options.payload = value.into_bytes();
+            }
+            "--send-hex" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage(
+                        "missing value for network scan --send-hex".to_string(),
+                    ));
+                };
+                options.payload = parse_hex_payload(&value)?;
+            }
+            "--format" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage(
+                        "missing value for network scan --format".to_string(),
+                    ));
+                };
+                format = parse_network_probe_format(&value)?;
+            }
+            _ => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument for network scan: {arg}"
+                )))
+            }
+        }
+    }
+
+    let Some(host) = host else {
         return Err(CliError::Usage(
-            "missing evidence path for network".to_string(),
+            "network scan requires --host <host>".to_string(),
+        ));
+    };
+    let Some(ports) = ports else {
+        return Err(CliError::Usage(
+            "network scan requires --ports <list>".to_string(),
         ));
     };
 
-    Ok(NetworkArgs { path, format })
+    Ok(NetworkCommand::Scan {
+        host,
+        ports,
+        options,
+        format,
+    })
 }
 
 fn parse_address(value: &str) -> Result<Address, CliError> {
@@ -481,6 +698,24 @@ fn parse_address(value: &str) -> Result<Address, CliError> {
 fn parse_positive_usize(value: &str, option: &str) -> Result<usize, CliError> {
     let parsed = value
         .parse::<usize>()
+        .map_err(|_| CliError::Usage(format!("invalid value for {option}: {value}")))?;
+    if parsed == 0 {
+        return Err(CliError::Usage(format!(
+            "{option} must be greater than zero"
+        )));
+    }
+    Ok(parsed)
+}
+
+fn parse_usize(value: &str, option: &str) -> Result<usize, CliError> {
+    value
+        .parse::<usize>()
+        .map_err(|_| CliError::Usage(format!("invalid value for {option}: {value}")))
+}
+
+fn parse_positive_u64(value: &str, option: &str) -> Result<u64, CliError> {
+    let parsed = value
+        .parse::<u64>()
         .map_err(|_| CliError::Usage(format!("invalid value for {option}: {value}")))?;
     if parsed == 0 {
         return Err(CliError::Usage(format!(
@@ -511,6 +746,16 @@ fn parse_network_format(value: &str) -> Result<NetworkOutputFormat, CliError> {
     }
 }
 
+fn parse_network_probe_format(value: &str) -> Result<NetworkProbeOutputFormat, CliError> {
+    match value {
+        "text" => Ok(NetworkProbeOutputFormat::Text),
+        "json" => Ok(NetworkProbeOutputFormat::Json),
+        _ => Err(CliError::Usage(format!(
+            "invalid network probe --format value: {value}"
+        ))),
+    }
+}
+
 fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  kaiju info <file>");
@@ -526,11 +771,20 @@ fn print_usage() {
     eprintln!("  kaiju export <file>");
     eprintln!("  kaiju functions <file>");
     eprintln!("  kaiju symbols <file>");
+    eprintln!("  kaiju dependencies <file>");
     eprintln!("  kaiju imports <file>");
     eprintln!("  kaiju exports <file>");
     eprintln!("  kaiju relocations <file>");
     eprintln!("  kaiju xrefs <file>");
     eprintln!("  kaiju network <evidence-file> [--format text|dot|json]");
+    eprintln!("  kaiju network evidence <evidence-file> [--format text|dot|json]");
+    eprintln!("  kaiju network pcap <pcap-file> [--format text|dot|json]");
+    eprintln!(
+        "  kaiju network probe (--target HOST:PORT | HOST:PORT)... [--timeout-ms N] [--read-bytes N] [--send-text TEXT | --send-hex HEX] [--format text|json]"
+    );
+    eprintln!(
+        "  kaiju network scan --host HOST --ports LIST [--timeout-ms N] [--read-bytes N] [--send-text TEXT | --send-hex HEX] [--format text|json]"
+    );
     eprintln!("  kaiju arch");
 }
 
@@ -547,6 +801,7 @@ fn print_info(binary: &LoadedBinary) {
     println!("Entrypoint: {entrypoint}");
     println!("Regions: {}", binary.memory_map.regions().len());
     println!("Sections: {}", binary.sections.len());
+    println!("Dependencies: {}", binary.dependencies.len());
     println!("Symbols: {}", binary.symbols.len());
     println!("Imports: {}", binary.imports.len());
     println!("Exports: {}", binary.exports.len());
@@ -588,6 +843,13 @@ fn print_symbols(binary: &LoadedBinary) {
             .address
             .map_or_else(|| "-".to_string(), |address| address.to_string());
         println!("{:<24} {}", symbol.name, address);
+    }
+}
+
+fn print_dependencies(binary: &LoadedBinary) {
+    println!("Name");
+    for dependency in &binary.dependencies {
+        println!("{}", dependency.name);
     }
 }
 
@@ -846,6 +1108,7 @@ fn print_ir_function(function: &IrFunction) {
 fn print_analysis_summary(project: &Project, reports: &[AnalysisReport]) {
     println!("Path: {}", project.binary.path.display());
     println!("Passes: {}", reports.len());
+    println!("Dependencies: {}", project.dependencies().len());
     println!("Imports: {}", project.imports().len());
     println!("Exports: {}", project.exports().len());
     println!("Relocations: {}", project.relocations().len());
@@ -873,6 +1136,37 @@ fn analyze_project(path: PathBuf) -> KaijuResult<(Project, Vec<AnalysisReport>)>
     let mut project = Project::from_loaded_binary(binary);
     let reports = run_default_passes(&mut project, AnalysisConfig::default())?;
     Ok((project, reports))
+}
+
+fn run_network(command: NetworkCommand) -> KaijuResult<()> {
+    match command {
+        NetworkCommand::Evidence { path, format } => {
+            let network = load_network_evidence(path)?;
+            print_network(&network, format);
+        }
+        NetworkCommand::Pcap { path, format } => {
+            let network = load_pcap_evidence(path)?;
+            print_network(&network, format);
+        }
+        NetworkCommand::Probe {
+            targets,
+            options,
+            format,
+        } => {
+            let report = probe_targets(targets, options)?;
+            print_probe_report(&report, format);
+        }
+        NetworkCommand::Scan {
+            host,
+            ports,
+            options,
+            format,
+        } => {
+            let report = scan_ports(host, ports, options)?;
+            print_probe_report(&report, format);
+        }
+    }
+    Ok(())
 }
 
 fn print_functions(project: &Project) {
@@ -914,6 +1208,37 @@ fn print_network(network: &NetworkMap, format: NetworkOutputFormat) {
         NetworkOutputFormat::Text => print_network_text(network),
         NetworkOutputFormat::Dot => print_network_dot(network),
         NetworkOutputFormat::Json => println!("{}", network.to_json_pretty()),
+    }
+}
+
+fn print_probe_report(report: &ProbeReport, format: NetworkProbeOutputFormat) {
+    match format {
+        NetworkProbeOutputFormat::Text => print_probe_report_text(report),
+        NetworkProbeOutputFormat::Json => println!("{}", report.to_json_pretty()),
+    }
+}
+
+fn print_probe_report_text(report: &ProbeReport) {
+    println!("Mode: {}", report.mode);
+    println!("Targets: {}", report.results.len());
+    println!("Open: {}", report.open_count());
+    println!("Closed: {}", report.closed_count());
+    println!("Errors: {}", report.error_count());
+    println!("Results:");
+    println!("Target  Status  Remote  ElapsedMs  Sent  Received  PayloadKind  Preview  Error");
+    for result in &report.results {
+        println!(
+            "{:<28} {:<14} {:<24} {:<9} {:<5} {:<8} {:<11} {:<24} {}",
+            result.target.label(),
+            result.status,
+            result.remote_addr.as_deref().unwrap_or("-"),
+            result.elapsed_ms,
+            result.sent_bytes,
+            result.received.byte_len,
+            result.received.kind,
+            format_payload_preview(&result.received.ascii_preview),
+            result.error.as_deref().unwrap_or("-")
+        );
     }
 }
 
@@ -1023,6 +1348,14 @@ fn format_line_numbers(lines: &[usize]) -> String {
         .join(",")
 }
 
+fn format_payload_preview(value: &str) -> &str {
+    if value.is_empty() {
+        "-"
+    } else {
+        value
+    }
+}
+
 fn xref_kind_name(kind: CrossReferenceKind) -> &'static str {
     match kind {
         CrossReferenceKind::Flow => "flow",
@@ -1071,9 +1404,32 @@ struct LiftArgs {
 }
 
 #[derive(Debug)]
-struct NetworkArgs {
+struct NetworkMapArgs {
     path: PathBuf,
     format: NetworkOutputFormat,
+}
+
+#[derive(Debug)]
+enum NetworkCommand {
+    Evidence {
+        path: PathBuf,
+        format: NetworkOutputFormat,
+    },
+    Pcap {
+        path: PathBuf,
+        format: NetworkOutputFormat,
+    },
+    Probe {
+        targets: Vec<kaiju_network::ProbeTarget>,
+        options: ProbeOptions,
+        format: NetworkProbeOutputFormat,
+    },
+    Scan {
+        host: String,
+        ports: Vec<u16>,
+        options: ProbeOptions,
+        format: NetworkProbeOutputFormat,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1086,6 +1442,12 @@ enum CfgOutputFormat {
 enum NetworkOutputFormat {
     Text,
     Dot,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum NetworkProbeOutputFormat {
+    Text,
     Json,
 }
 

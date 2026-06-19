@@ -1,12 +1,13 @@
 # Phase 14-45 Plan
 
 This plan extends Kaiju beyond the initial Phase 0-13 foundation. The goal is
-to keep the project moving through safe, headless, testable foundations before
-building GUI, scripting execution, dynamic plugins, or decompiler claims.
+to track the safe, headless, testable foundations that were needed before
+adding the native workbench, scripting execution, dynamic plugins, or
+decompiler claims.
 
 ## Phase Map
 
-14. GUI plan boundary: keep GUI deferred until headless APIs are stable.
+14. GUI plan boundary: defer GUI work until headless APIs are stable.
 15. Project snapshot model: export stable project summaries and facts.
 16. Project query APIs: functions, strings, xrefs, and analysis facts.
 17. Architecture crate: trait, built-in architecture descriptors, register
@@ -45,13 +46,13 @@ building GUI, scripting execution, dynamic plugins, or decompiler claims.
 44. Release checklist: quality gate, docs, threat model, and command smoke
     checks.
 45. Integration readiness gate: confirm all headless foundation surfaces are
-    wired, tested, and documented before GUI or decompiler work.
+    wired, tested, and documented before native workbench or decompiler work.
 
 ## Current Phase 45 Boundary
 
-The current repository reaches the Phase 45 planning boundary by implementing
-the safe headless pieces that do not require premature GUI, dynamic plugin,
-scripting runtime, or decompiler work:
+The repository reached the Phase 45 planning boundary by implementing the safe
+headless pieces that did not require premature GUI, dynamic plugin, scripting
+runtime, or decompiler work:
 
 - `kaiju-arch` built-in architecture descriptors.
 - project summaries, query APIs, and deterministic JSON export.
@@ -63,8 +64,15 @@ scripting runtime, or decompiler work:
 - read-only `.kaiju` package inspection and schema validation.
 - bounded Mach-O section relocation parsing.
 - bounded universal/fat Mach-O member selection.
-- documented future boundaries for GUI, plugins, scripting, fuzzing, snapshots,
-  and release readiness.
+- documented future boundaries for plugins, scripting, fuzzing, snapshots, and
+  release readiness.
 
 This does not mean Kaiju is feature-complete. It means the roadmap through
 Phase 45 is source-tracked and the safe foundation slices are implemented.
+
+## Subsequent Workbench Slice
+
+After that boundary, Kaiju added `kaiju-workbench`: a native Rust desktop app
+backed by the same loader, project, analysis, disassembly, CFG, and IR crates.
+It replaces the earlier HTML GUI surface and keeps GUI behavior tied to the
+tested headless APIs.

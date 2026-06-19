@@ -9,6 +9,7 @@ members = [
     "crates/kaiju-ir",
     "crates/kaiju-project",
     "crates/kaiju-plugin-api",
+    "crates/kaiju-workbench",
     "crates/kaiju-cli",
     "examples/basic-load",
     "examples/basic-disasm",

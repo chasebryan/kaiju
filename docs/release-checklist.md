@@ -60,8 +60,8 @@ because raw input has no entrypoint and no known architecture.
 - `docs/network-model.md` matches `kaiju network` output.
 - `docs/snapshot-testing.md` matches the fixtures in `tests/snapshots/`.
 - `docs/threat-model.md` covers new parser or execution surfaces.
-- No GUI, decompiler, dynamic plugin loading, or script execution is claimed
-  before it exists.
+- No decompiler, dynamic plugin loading, or script execution is claimed before
+  it exists. GUI claims are limited to the native `kaiju-workbench` prototype.
 
 ## Security Checks
 

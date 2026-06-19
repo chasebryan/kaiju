@@ -205,3 +205,8 @@ existing thin Mach-O loader path, rejects truncated architecture tables,
 zero-sized members, and members outside the file, and reports the selected
 member through diagnostics without claiming a full multi-architecture selection
 policy or dynamic-loader binding metadata.
+
+The first GUI prototype slice added a native Rust `kaiju-workbench` app. It
+renders a black, red, and white workbench with a project browser, disassembly
+view, strings view, CFG view, and IR view backed by the existing loader,
+project, analysis, disassembly, CFG, and IR crates.

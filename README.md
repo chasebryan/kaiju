@@ -54,6 +54,7 @@ what works:
 - project JSON export
 - safe `.kaiju` project package snapshots
 - read-only `.kaiju` project package inspection
+- native Rust GUI workbench
 
 try:
 
@@ -76,6 +77,7 @@ cargo run -p kaiju-cli -- functions tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- ir tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- xrefs tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- network tests/fixtures/network-evidence.txt
+cargo run -p kaiju-workbench -- tests/fixtures/raw.bin
 ```
 
 not yet:
@@ -85,7 +87,6 @@ not yet:
 - full disassembly
 - lifting worth bragging about
 - decompiler
-- GUI
 - plugin runtime
 
 the rule: build the foundation before the monster suit.

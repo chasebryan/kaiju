@@ -24,6 +24,8 @@ construction, IR lifting, scripting, plugins, and a GUI.
   bounded payload inspection, and explicit TCP probe reports.
 - `kaiju-project`: in-memory project state that can hold a loaded binary and
   analysis facts.
+- `kaiju-workbench`: native Rust desktop workbench backed by loader, project,
+  analysis, disassembly, CFG, and IR crates.
 - `kaiju-cli`: headless command-line interface.
 
 Future crates will split architecture modeling, disassembly, IR, analysis, and
@@ -195,6 +197,18 @@ cross-references from decoded x86-64 basic blocks, records bounded IR summaries
 for discovered CFG blocks, and summarizes cross-references. CFG and IR failures
 from unsupported architectures are reported as warnings so raw or unsupported
 files can still produce a useful analysis summary.
+
+## Workbench GUI
+
+The first GUI surface is the native Rust `kaiju-workbench` app. It uses the same
+headless loader and default analysis pipeline as `kaiju analyze`, then renders a
+black, red, and white project browser, disassembly view, strings view, CFG view,
+and IR view in a desktop window. It accepts an optional file path at startup and
+also exposes a path field inside the workbench for loading another binary.
+
+This is intentionally not a full project database yet. Future GUI work should
+add persistence, annotation editing, richer navigation contracts, and eventually
+deeper disassembly/lifting views without weakening the headless APIs.
 
 ## Plugin And Scripting Boundaries
 

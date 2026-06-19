@@ -60,8 +60,22 @@ pub enum Operand {
     Register(String),
     Immediate(u64),
     Memory(String),
+    MemoryAddress {
+        expression: String,
+        address: Address,
+    },
     Address(Address),
     Text(String),
+}
+
+impl Operand {
+    #[must_use]
+    pub const fn memory_address(&self) -> Option<Address> {
+        match self {
+            Self::MemoryAddress { address, .. } => Some(*address),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Operand {
@@ -70,6 +84,7 @@ impl fmt::Display for Operand {
             Self::Register(register) | Self::Memory(register) | Self::Text(register) => {
                 formatter.write_str(register)
             }
+            Self::MemoryAddress { expression, .. } => formatter.write_str(expression),
             Self::Immediate(value) => write!(formatter, "0x{value:x}"),
             Self::Address(address) => write!(formatter, "{address}"),
         }
@@ -209,8 +224,33 @@ fn decode_x86_64(bytes: &[u8], address: Address) -> Result<Instruction> {
         0x0b => decode_modrm_reg_reg(bytes, address, index, rex, "or", OperandOrder::RegRm),
         0x21 => decode_modrm_reg_reg(bytes, address, index, rex, "and", OperandOrder::RmReg),
         0x23 => decode_modrm_reg_reg(bytes, address, index, rex, "and", OperandOrder::RegRm),
-        0x89 => decode_modrm_reg_reg(bytes, address, index, rex, "mov", OperandOrder::RmReg),
-        0x8b => decode_modrm_reg_reg(bytes, address, index, rex, "mov", OperandOrder::RegRm),
+        0x89 => decode_modrm_reg_or_rip_memory(
+            bytes,
+            address,
+            index,
+            rex,
+            "mov",
+            OperandOrder::RmReg,
+            true,
+        ),
+        0x8b => decode_modrm_reg_or_rip_memory(
+            bytes,
+            address,
+            index,
+            rex,
+            "mov",
+            OperandOrder::RegRm,
+            true,
+        ),
+        0x8d => decode_modrm_reg_or_rip_memory(
+            bytes,
+            address,
+            index,
+            rex,
+            "lea",
+            OperandOrder::RegRm,
+            false,
+        ),
         0x01 => decode_modrm_reg_reg(bytes, address, index, rex, "add", OperandOrder::RmReg),
         0x03 => decode_modrm_reg_reg(bytes, address, index, rex, "add", OperandOrder::RegRm),
         0x29 => decode_modrm_reg_reg(bytes, address, index, rex, "sub", OperandOrder::RmReg),
@@ -302,13 +342,7 @@ fn decode_modrm_reg_reg(
     let Some((reg, rm)) = direct_register_operands(modrm, rex) else {
         return Ok(unknown_instruction(bytes, address));
     };
-    let width64 = rex.w;
-    let reg = Operand::Register(register_name(reg, width64).to_string());
-    let rm = Operand::Register(register_name(rm, width64).to_string());
-    let operands = match order {
-        OperandOrder::RmReg => vec![rm, reg],
-        OperandOrder::RegRm => vec![reg, rm],
-    };
+    let operands = ordered_reg_rm_operands(reg, rm, rex.w, order);
 
     Ok(instruction(
         address,
@@ -318,6 +352,104 @@ fn decode_modrm_reg_reg(
         operands,
         FlowKind::Normal,
     ))
+}
+
+fn decode_modrm_reg_or_rip_memory(
+    bytes: &[u8],
+    address: Address,
+    opcode_index: usize,
+    rex: RexPrefix,
+    mnemonic: &str,
+    order: OperandOrder,
+    allow_register_operands: bool,
+) -> Result<Instruction> {
+    let Some(modrm) = bytes.get(opcode_index + 1).copied() else {
+        return Ok(unknown_instruction(bytes, address));
+    };
+    if allow_register_operands {
+        if let Some((reg, rm)) = direct_register_operands(modrm, rex) {
+            return Ok(instruction(
+                address,
+                bytes,
+                opcode_index + 2,
+                mnemonic,
+                ordered_reg_rm_operands(reg, rm, rex.w, order),
+                FlowKind::Normal,
+            ));
+        }
+    } else if modrm >> 6 == 0b11 {
+        return Ok(unknown_instruction(bytes, address));
+    }
+
+    let Some((reg, memory, size)) =
+        rip_relative_memory_operand(bytes, address, opcode_index, modrm, rex)
+    else {
+        return Ok(unknown_instruction(bytes, address));
+    };
+    let reg = Operand::Register(register_name(reg, rex.w).to_string());
+    let operands = match order {
+        OperandOrder::RmReg => vec![memory, reg],
+        OperandOrder::RegRm => vec![reg, memory],
+    };
+
+    Ok(instruction(
+        address,
+        bytes,
+        size,
+        mnemonic,
+        operands,
+        FlowKind::Normal,
+    ))
+}
+
+fn ordered_reg_rm_operands(reg: u8, rm: u8, width64: bool, order: OperandOrder) -> Vec<Operand> {
+    let reg = Operand::Register(register_name(reg, width64).to_string());
+    let rm = Operand::Register(register_name(rm, width64).to_string());
+    match order {
+        OperandOrder::RmReg => vec![rm, reg],
+        OperandOrder::RegRm => vec![reg, rm],
+    }
+}
+
+fn rip_relative_memory_operand(
+    bytes: &[u8],
+    address: Address,
+    opcode_index: usize,
+    modrm: u8,
+    rex: RexPrefix,
+) -> Option<(u8, Operand, usize)> {
+    if modrm >> 6 != 0 || modrm & 0x7 != 0x5 {
+        return None;
+    }
+
+    let size = opcode_index + 6;
+    let displacement_bytes = bytes.get(opcode_index + 2..size)?;
+    let displacement = i64::from(i32::from_le_bytes([
+        displacement_bytes[0],
+        displacement_bytes[1],
+        displacement_bytes[2],
+        displacement_bytes[3],
+    ]));
+    let target = relative_target(address, size as u64, displacement)?;
+    let expression = format_rip_relative_expression(displacement);
+    let reg = ((modrm >> 3) & 0x7) | rex_r(&rex);
+
+    Some((
+        reg,
+        Operand::MemoryAddress {
+            expression,
+            address: target,
+        },
+        size,
+    ))
+}
+
+fn format_rip_relative_expression(displacement: i64) -> String {
+    if displacement < 0 {
+        format!("[rip - 0x{:x}]", displacement.unsigned_abs())
+    } else {
+        format!("[rip + 0x{:x}]", displacement as u64)
+    }
 }
 
 fn decode_group83(
@@ -630,5 +762,48 @@ mod tests {
         assert_eq!(or.mnemonic, "or");
         assert_eq!(cmp.mnemonic, "cmp");
         assert_eq!(test.mnemonic, "test");
+    }
+
+    #[test]
+    fn decodes_rip_relative_lea_and_mov_operands() {
+        let disassembler = X86_64Disassembler::new();
+
+        let lea = disassembler
+            .disassemble_one(
+                &[0x48, 0x8d, 0x05, 0x01, 0x00, 0x00, 0x00],
+                Address::new(0x4000),
+            )
+            .expect("lea");
+        let mov_read = disassembler
+            .disassemble_one(
+                &[0x48, 0x8b, 0x05, 0x00, 0x00, 0x00, 0x00],
+                Address::new(0x5000),
+            )
+            .expect("mov read");
+        let mov_write = disassembler
+            .disassemble_one(
+                &[0x48, 0x89, 0x05, 0x00, 0x00, 0x00, 0x00],
+                Address::new(0x6000),
+            )
+            .expect("mov write");
+
+        assert_eq!(lea.mnemonic, "lea");
+        assert_eq!(lea.operands[0], Operand::Register("rax".to_string()));
+        assert_eq!(lea.operands[1].memory_address(), Some(Address::new(0x4008)));
+        assert_eq!(lea.operands[1].to_string(), "[rip + 0x1]");
+        assert_eq!(
+            mov_read.operands[1].memory_address(),
+            Some(Address::new(0x5007))
+        );
+        assert_eq!(
+            mov_write.operands[0].memory_address(),
+            Some(Address::new(0x6007))
+        );
+
+        let register_lea = disassembler
+            .disassemble_one(&[0x48, 0x8d, 0xc0], Address::new(0x7000))
+            .expect("invalid register lea should decode as unknown bytes");
+        assert_eq!(register_lea.mnemonic, "db");
+        assert_eq!(register_lea.flow, FlowKind::Unknown);
     }
 }

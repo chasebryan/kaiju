@@ -26,6 +26,8 @@ cargo run -p kaiju-cli -- diagnostics tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- strings tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- analyze tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- export tests/fixtures/raw.bin
+cargo run -p kaiju-cli -- functions tests/fixtures/raw.bin
+cargo run -p kaiju-cli -- xrefs tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- symbols tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- dependencies tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- imports tests/fixtures/raw.bin

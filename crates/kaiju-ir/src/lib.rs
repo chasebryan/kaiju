@@ -311,7 +311,7 @@ fn operand_expr(operand: &Operand) -> IrExpr {
         Operand::Register(register) => IrExpr::Var(IrValue::Register(register.clone())),
         Operand::Immediate(value) => IrExpr::Const(*value),
         Operand::Address(address) => IrExpr::Const(address.value()),
-        Operand::Memory(_) | Operand::Text(_) => IrExpr::Unknown,
+        Operand::Memory(_) | Operand::MemoryAddress { .. } | Operand::Text(_) => IrExpr::Unknown,
     }
 }
 

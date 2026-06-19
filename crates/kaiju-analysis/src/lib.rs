@@ -7,8 +7,8 @@ use kaiju_core::{Address, KaijuError, KaijuErrorKind, Result};
 use kaiju_disasm::{disassembler_for_architecture, Disassembler, FlowKind, Instruction};
 use kaiju_loader::LoadedBinary;
 use kaiju_project::{
-    Project, ProjectBasicBlock, ProjectCfg, ProjectCfgEdge, ProjectCfgEdgeKind, ProjectString,
-    ProjectStringEncoding,
+    CrossReference, CrossReferenceKind, Project, ProjectBasicBlock, ProjectCfg, ProjectCfgEdge,
+    ProjectCfgEdgeKind, ProjectString, ProjectStringEncoding,
 };
 
 const MAX_INSTRUCTION_BYTES: usize = 15;
@@ -99,6 +99,7 @@ pub fn default_analysis_passes(config: AnalysisConfig) -> Vec<Box<dyn AnalysisPa
             options: config.cfg_options,
         }),
         Box::new(FunctionDiscoveryPass),
+        Box::new(DataReferencePass),
         Box::new(CrossReferenceSummaryPass),
     ]
 }
@@ -267,6 +268,38 @@ impl AnalysisPass for FunctionDiscoveryPass {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataReferencePass;
+
+impl AnalysisPass for DataReferencePass {
+    fn name(&self) -> &'static str {
+        "data-references"
+    }
+
+    fn run(&self, project: &mut Project) -> Result<AnalysisReport> {
+        let stats = match record_data_references(project) {
+            Ok(stats) => stats,
+            Err(error) => {
+                return Ok(AnalysisReport::new(self.name())
+                    .with_warning(format!("data reference discovery skipped: {error}")))
+            }
+        };
+
+        project.add_analysis_fact(kaiju_project::AnalysisFact::new(
+            self.name(),
+            "references",
+            stats.references.to_string(),
+        ));
+        project.add_analysis_fact(kaiju_project::AnalysisFact::new(
+            self.name(),
+            "string_targets",
+            stats.string_targets.to_string(),
+        ));
+
+        Ok(AnalysisReport::new(self.name()).with_facts(stats.xrefs_added))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlFlowGraph {
     pub function_start: Address,
@@ -326,6 +359,19 @@ enum FunctionSeedSource {
     Symbol,
     Export,
     CallTarget,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DataReferenceStats {
+    pub xrefs_added: usize,
+    pub references: usize,
+    pub string_targets: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DataReferenceDiscovery {
+    xrefs: BTreeSet<CrossReference>,
+    string_targets: BTreeSet<Address>,
 }
 
 pub fn build_cfg(
@@ -512,6 +558,100 @@ pub fn record_cfg(project: &mut Project, graph: &ControlFlowGraph) {
             })
             .collect(),
     });
+}
+
+pub fn record_data_references(project: &mut Project) -> Result<DataReferenceStats> {
+    let discovery = discover_data_references(project)?;
+    let mut xrefs_added = 0_usize;
+
+    for xref in &discovery.xrefs {
+        if !project.xrefs().contains(xref) {
+            xrefs_added += 1;
+        }
+        project.add_xref(*xref);
+    }
+
+    Ok(DataReferenceStats {
+        xrefs_added,
+        references: discovery.xrefs.len(),
+        string_targets: discovery.string_targets.len(),
+    })
+}
+
+fn discover_data_references(project: &Project) -> Result<DataReferenceDiscovery> {
+    if project.basic_blocks().is_empty() {
+        return Ok(DataReferenceDiscovery::default());
+    }
+
+    let disassembler = disassembler_for_architecture(project.binary.arch)?;
+    let mut discovery = DataReferenceDiscovery::default();
+
+    for block in project.basic_blocks().values() {
+        let mut current = block.start;
+        let mut decoded = 0_usize;
+
+        while current < block.end && decoded < block.instruction_count {
+            let bytes = read_instruction_window(&project.binary, current)?;
+            let instruction = disassembler.disassemble_one(&bytes, current)?;
+            if instruction.size == 0 {
+                return Err(KaijuError::new(
+                    KaijuErrorKind::DecodeError,
+                    "decoder returned a zero-sized instruction",
+                ));
+            }
+
+            record_instruction_data_references(project, &instruction, &mut discovery);
+            current = current
+                .checked_add(u64::from(instruction.size))
+                .ok_or_else(|| {
+                    KaijuError::new(
+                        KaijuErrorKind::InvalidAddress,
+                        "instruction address overflow during data reference discovery",
+                    )
+                })?;
+            decoded += 1;
+        }
+    }
+
+    Ok(discovery)
+}
+
+fn record_instruction_data_references(
+    project: &Project,
+    instruction: &Instruction,
+    discovery: &mut DataReferenceDiscovery,
+) {
+    for (index, operand) in instruction.operands.iter().enumerate() {
+        let Some(target) = operand.memory_address() else {
+            continue;
+        };
+        if !is_mapped(&project.binary, target) {
+            continue;
+        }
+
+        discovery.xrefs.insert(CrossReference {
+            from: instruction.address,
+            to: target,
+            kind: data_reference_kind(instruction, index),
+        });
+
+        if project
+            .strings()
+            .iter()
+            .any(|string| string_contains_address(string, target))
+        {
+            discovery.string_targets.insert(target);
+        }
+    }
+}
+
+fn data_reference_kind(instruction: &Instruction, operand_index: usize) -> CrossReferenceKind {
+    match instruction.mnemonic.as_str() {
+        "lea" => CrossReferenceKind::Data,
+        "mov" if operand_index == 0 => CrossReferenceKind::Write,
+        "mov" => CrossReferenceKind::Read,
+        _ => CrossReferenceKind::Data,
+    }
 }
 
 fn discover_function_seeds(project: &Project) -> Vec<FunctionSeed> {
@@ -773,6 +913,32 @@ fn project_cfg_edge_kind(kind: EdgeKind) -> ProjectCfgEdgeKind {
     }
 }
 
+fn string_contains_address(string: &ProjectString, address: Address) -> bool {
+    let Some(start) = string.virtual_address else {
+        return false;
+    };
+    let Some(byte_len) = project_string_byte_len(string) else {
+        return false;
+    };
+    if byte_len == 0 {
+        return false;
+    }
+    let Some(end) = start.checked_add(byte_len) else {
+        return false;
+    };
+
+    address >= start && address < end
+}
+
+fn project_string_byte_len(string: &ProjectString) -> Option<u64> {
+    let char_len = u64::try_from(string.char_len).ok()?;
+    match &string.encoding {
+        ProjectStringEncoding::Ascii => Some(char_len),
+        ProjectStringEncoding::Utf16Le => char_len.checked_mul(2),
+        ProjectStringEncoding::Other(_) => Some(char_len),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -993,7 +1159,7 @@ mod tests {
         let reports = run_default_passes(&mut project, AnalysisConfig::default())
             .expect("run default passes");
 
-        assert_eq!(reports.len(), 5);
+        assert_eq!(reports.len(), 6);
         assert!(project.function(Address::new(0x6000)).is_some());
         assert!(!project.basic_blocks().is_empty());
         assert!(!project.xrefs().is_empty());
@@ -1001,6 +1167,10 @@ mod tests {
             .analysis_facts()
             .iter()
             .any(|fact| fact.namespace == "function-discovery"));
+        assert!(project
+            .analysis_facts()
+            .iter()
+            .any(|fact| fact.namespace == "data-references"));
         assert!(project
             .analysis_facts()
             .iter()
@@ -1057,6 +1227,37 @@ mod tests {
             fact.namespace == "function-discovery"
                 && fact.key == "call_targets"
                 && fact.value == "1"
+        }));
+    }
+
+    #[test]
+    fn default_analysis_records_rip_relative_string_xrefs() {
+        let mut bytes = vec![0x48, 0x8d, 0x05, 0x01, 0x00, 0x00, 0x00, 0xc3];
+        bytes.extend_from_slice(b"kaiju-target\0");
+        let binary = test_binary(Address::new(0x9000), bytes, ArchitectureId::X86_64);
+        let mut project = Project::from_loaded_binary(binary);
+
+        let reports = run_default_passes(&mut project, AnalysisConfig::default())
+            .expect("run default passes");
+        let data_references = reports
+            .iter()
+            .find(|report| report.pass_name == "data-references")
+            .expect("data reference report");
+
+        assert_eq!(data_references.facts_added, 1);
+        assert!(project.strings().iter().any(|string| {
+            string.virtual_address == Some(Address::new(0x9008)) && string.value == "kaiju-target"
+        }));
+        assert!(project.xrefs().contains(&CrossReference {
+            from: Address::new(0x9000),
+            to: Address::new(0x9008),
+            kind: CrossReferenceKind::Data,
+        }));
+        assert!(project.analysis_facts().iter().any(|fact| {
+            fact.namespace == "data-references" && fact.key == "references" && fact.value == "1"
+        }));
+        assert!(project.analysis_facts().iter().any(|fact| {
+            fact.namespace == "data-references" && fact.key == "string_targets" && fact.value == "1"
         }));
     }
 

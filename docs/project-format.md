@@ -24,7 +24,7 @@ The command loads a binary, runs the default analysis passes, and prints a
   targets
 - basic block summaries
 - extracted strings
-- cross-references
+- flow, call, and conservative RIP-relative data cross-references
 - analysis facts
 
 The snapshot is intentionally derived output. It is not a stable editable

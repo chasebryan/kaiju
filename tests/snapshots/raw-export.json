@@ -21,7 +21,7 @@
     "functions": 0,
     "blocks": 0,
     "xrefs": 0,
-    "analysis_facts": 5
+    "analysis_facts": 7
   },
   "functions": [],
   "blocks": [],
@@ -47,6 +47,16 @@
   ],
   "xrefs": [],
   "analysis_facts": [
+    {
+      "namespace": "data-references",
+      "key": "references",
+      "value": "0"
+    },
+    {
+      "namespace": "data-references",
+      "key": "string_targets",
+      "value": "0"
+    },
     {
       "namespace": "function-discovery",
       "key": "call_targets",

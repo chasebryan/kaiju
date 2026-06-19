@@ -1,5 +1,5 @@
 Path: <RAW_FIXTURE>
-Passes: 5
+Passes: 6
 Dependencies: 0
 Imports: 0
 Exports: 0
@@ -8,7 +8,7 @@ Strings: 1
 Functions: 0
 Blocks: 0
 Xrefs: 0
-AnalysisFacts: 5
+AnalysisFacts: 7
 Reports:
 - strings facts=1 warnings=0
 - entrypoint-function facts=0 warnings=1
@@ -16,4 +16,5 @@ Reports:
 - entrypoint-cfg facts=0 warnings=1
   warning: binary does not define an entrypoint
 - function-discovery facts=0 warnings=0
+- data-references facts=0 warnings=0
 - xref-summary facts=1 warnings=0

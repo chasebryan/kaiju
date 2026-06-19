@@ -553,7 +553,7 @@ fn cli_analyze_reports_project_summary() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
-    assert!(stdout.contains("Passes: 5"));
+    assert!(stdout.contains("Passes: 6"));
     assert!(stdout.contains("Dependencies: 0"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
@@ -563,6 +563,7 @@ fn cli_analyze_reports_project_summary() {
     assert!(stdout.contains("Xrefs:"));
     assert!(stdout.contains("entrypoint-cfg"));
     assert!(stdout.contains("function-discovery"));
+    assert!(stdout.contains("data-references"));
 
     let _ = fs::remove_file(path);
 }
@@ -577,7 +578,7 @@ fn cli_analyze_raw_fixture_succeeds_with_warnings() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
-    assert!(stdout.contains("Passes: 5"));
+    assert!(stdout.contains("Passes: 6"));
     assert!(stdout.contains("Dependencies: 0"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
@@ -650,6 +651,50 @@ fn cli_functions_reports_direct_call_target_functions() {
     assert!(stdout.contains("0x0000000000401000"));
     assert!(stdout.contains("0x0000000000401006"));
     assert!(stdout.contains("call"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn cli_xrefs_reports_rip_relative_string_data_refs() {
+    let path = write_temp_data_xref_elf_fixture();
+
+    let xrefs = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("xrefs")
+        .arg(&path)
+        .output()
+        .expect("run kaiju xrefs");
+
+    assert!(xrefs.status.success());
+    let stdout = String::from_utf8(xrefs.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("From  To  Kind"));
+    assert!(stdout.contains("0x0000000000401000"));
+    assert!(stdout.contains("0x0000000000401008"));
+    assert!(stdout.contains("data"));
+
+    let analyze = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("analyze")
+        .arg(&path)
+        .output()
+        .expect("run kaiju analyze");
+
+    assert!(analyze.status.success());
+    let stdout = String::from_utf8(analyze.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("data-references"));
+    assert!(stdout.contains("- data-references facts=1 warnings=0"));
+
+    let export = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("export")
+        .arg(&path)
+        .output()
+        .expect("run kaiju export");
+
+    assert!(export.status.success());
+    let stdout = String::from_utf8(export.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("\"namespace\": \"data-references\""));
+    assert!(stdout.contains("\"key\": \"string_targets\""));
+    assert!(stdout.contains("\"kind\": \"data\""));
+    assert!(stdout.contains("kaiju-target"));
 
     let _ = fs::remove_file(path);
 }
@@ -1003,6 +1048,19 @@ fn write_temp_call_elf_fixture() -> PathBuf {
     path
 }
 
+fn write_temp_data_xref_elf_fixture() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "kaiju-cli-data-xref-{}-{unique}.bin",
+        process::id()
+    ));
+    fs::write(&path, synthetic_data_xref_elf64_le()).expect("write data xref ELF fixture");
+    path
+}
+
 fn write_temp_elf_dynamic_fixture() -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1146,6 +1204,12 @@ fn synthetic_cfg_elf64_le() -> Vec<u8> {
 
 fn synthetic_call_elf64_le() -> Vec<u8> {
     synthetic_elf64_le_with_code(&[0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xc3])
+}
+
+fn synthetic_data_xref_elf64_le() -> Vec<u8> {
+    let mut code = vec![0x48, 0x8d, 0x05, 0x01, 0x00, 0x00, 0x00, 0xc3];
+    code.extend_from_slice(b"kaiju-target\0");
+    synthetic_elf64_le_with_code(&code)
 }
 
 fn synthetic_elf64_le_with_code(code: &[u8]) -> Vec<u8> {

@@ -45,6 +45,8 @@ what works:
 - direct-branch CFGs
 - conservative function discovery from entrypoints, loader metadata, and direct
   call targets
+- conservative RIP-relative data and string cross-references from decoded
+  x86-64 basic blocks
 - project JSON export
 
 try:

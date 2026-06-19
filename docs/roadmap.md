@@ -153,3 +153,9 @@ promotes executable entrypoints, loader symbols, exports, and direct call
 targets into project functions, records seed-source counts, and exposes the
 results through existing `analyze`, `functions`, `xrefs`, and project JSON
 surfaces without claiming recursive whole-program recovery.
+
+The data-reference slice added conservative x86-64 RIP-relative operand
+decoding for `lea` and `mov`, records mapped data/read/write xrefs from decoded
+basic blocks, counts string-target references, and exposes those facts through
+existing `analyze`, `xrefs`, and project JSON surfaces without claiming full
+data-flow analysis, pointer tracking, or complete instruction coverage.

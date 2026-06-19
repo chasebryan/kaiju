@@ -18,7 +18,8 @@ building GUI, scripting execution, dynamic plugins, or decompiler claims.
 22. Label/comment persistence plan: store user annotations in future project
     files.
 23. Symbol and import expansion plan: normalize richer loader metadata later.
-24. Data discovery plan: strings first, then references and typed data.
+24. Data discovery plan: strings and conservative references first, then typed
+    data.
 25. Loader diagnostics plan: preserve parser notes and skipped structures.
 26. Mach-O parser milestone: replace detection-only handling.
 27. ELF hardening milestone: expand symbols, relocations, and malformed cases.
@@ -31,7 +32,8 @@ building GUI, scripting execution, dynamic plugins, or decompiler claims.
 33. Data-flow plan: use IR and CFG facts for read/write propagation.
 34. Function discovery expansion: recursive descent, symbols, prologues, and
     executable region seeds.
-35. Xref expansion: direct code xrefs first, data xrefs later.
+35. Xref expansion: direct code xrefs and conservative RIP-relative data xrefs
+    first, richer data xrefs later.
 36. Project package plan: future `.kaiju` directory layout.
 37. Plugin capability hardening: explicit plugin permissions.
 38. WASM plugin research boundary: no untrusted native loading by default.
@@ -54,6 +56,7 @@ scripting runtime, or decompiler work:
 - `kaiju-arch` built-in architecture descriptors.
 - project summaries, query APIs, and deterministic JSON export.
 - CLI `export`, `functions`, `xrefs`, and `arch` commands.
+- conservative function discovery and RIP-relative data/string xrefs.
 - documented future boundaries for GUI, plugins, scripting, fuzzing, snapshots,
   and release readiness.
 

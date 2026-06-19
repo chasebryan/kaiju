@@ -640,9 +640,14 @@ fn cli_functions_reports_direct_call_target_functions() {
     assert!(stdout.contains("Start  Name  Blocks"));
     assert!(stdout.contains("0x0000000000401000"));
     assert!(stdout.contains("0x0000000000401006"));
+    assert!(stdout.contains("0x000000000040100c"));
     assert!(stdout.lines().any(|line| {
         let columns = line.split_whitespace().collect::<Vec<_>>();
         columns == ["0x0000000000401006", "-", "1"]
+    }));
+    assert!(stdout.lines().any(|line| {
+        let columns = line.split_whitespace().collect::<Vec<_>>();
+        columns == ["0x000000000040100c", "-", "1"]
     }));
 
     let xrefs = Command::new(env!("CARGO_BIN_EXE_kaiju"))
@@ -655,10 +660,19 @@ fn cli_functions_reports_direct_call_target_functions() {
     let stdout = String::from_utf8(xrefs.stdout).expect("stdout should be utf-8");
     assert!(stdout.contains("0x0000000000401000"));
     assert!(stdout.contains("0x0000000000401006"));
+    assert!(stdout.contains("0x000000000040100c"));
     assert!(stdout.contains("call"));
     assert!(stdout.lines().any(|line| {
         let columns = line.split_whitespace().collect::<Vec<_>>();
-        columns == ["0x0000000000401006", "0x0000000000401006", "flow"]
+        columns == ["0x0000000000401006", "0x000000000040100b", "flow"]
+    }));
+    assert!(stdout.lines().any(|line| {
+        let columns = line.split_whitespace().collect::<Vec<_>>();
+        columns == ["0x0000000000401006", "0x000000000040100c", "call"]
+    }));
+    assert!(stdout.lines().any(|line| {
+        let columns = line.split_whitespace().collect::<Vec<_>>();
+        columns == ["0x000000000040100c", "0x000000000040100c", "flow"]
     }));
 
     let _ = fs::remove_file(path);
@@ -1212,7 +1226,9 @@ fn synthetic_cfg_elf64_le() -> Vec<u8> {
 }
 
 fn synthetic_call_elf64_le() -> Vec<u8> {
-    synthetic_elf64_le_with_code(&[0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xc3])
+    synthetic_elf64_le_with_code(&[
+        0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xc3,
+    ])
 }
 
 fn synthetic_data_xref_elf64_le() -> Vec<u8> {

@@ -12,6 +12,7 @@ use kaiju_project::{
 };
 
 const MAX_INSTRUCTION_BYTES: usize = 15;
+const MAX_FUNCTION_CFG_ITERATIONS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StringEncoding {
@@ -304,6 +305,11 @@ impl AnalysisPass for FunctionCfgPass {
             "skipped",
             stats.skipped.to_string(),
         ));
+        project.add_analysis_fact(kaiju_project::AnalysisFact::new(
+            self.name(),
+            "promoted_call_targets",
+            stats.promoted_call_targets.to_string(),
+        ));
 
         let facts = stats.functions + stats.blocks + stats.edges;
         let mut report = AnalysisReport::new(self.name()).with_facts(facts);
@@ -420,6 +426,7 @@ pub struct FunctionCfgStats {
     pub blocks: usize,
     pub edges: usize,
     pub skipped: usize,
+    pub promoted_call_targets: usize,
     pub warnings: Vec<String>,
 }
 
@@ -619,32 +626,77 @@ pub fn record_discovered_function_cfgs(
     project: &mut Project,
     options: CfgOptions,
 ) -> FunctionCfgStats {
-    let function_starts = project.functions().keys().copied().collect::<Vec<_>>();
     let mut stats = FunctionCfgStats::default();
+    let mut observed_functions = BTreeSet::new();
+    let mut failed_functions = BTreeSet::new();
 
-    for function_start in function_starts {
-        if project.basic_block(function_start).is_some() {
-            stats.skipped += 1;
-            continue;
+    for iteration in 0..MAX_FUNCTION_CFG_ITERATIONS {
+        let promoted = promote_direct_call_target_functions(project);
+        stats.promoted_call_targets += promoted;
+
+        let mut cfgs_recorded = 0_usize;
+        let function_starts = project.functions().keys().copied().collect::<Vec<_>>();
+        for function_start in function_starts {
+            if failed_functions.contains(&function_start) {
+                continue;
+            }
+            if project.basic_block(function_start).is_some() {
+                if observed_functions.insert(function_start) {
+                    stats.skipped += 1;
+                }
+                continue;
+            }
+
+            observed_functions.insert(function_start);
+            match build_cfg(&project.binary, function_start, options) {
+                Ok(graph) => {
+                    stats.functions += 1;
+                    stats.blocks += graph.blocks.len();
+                    stats.edges += graph.edges.len();
+                    cfgs_recorded += 1;
+                    record_cfg(project, &graph);
+                }
+                Err(error) => {
+                    stats.skipped += 1;
+                    failed_functions.insert(function_start);
+                    stats
+                        .warnings
+                        .push(format!("CFG skipped for {function_start}: {error}"));
+                }
+            }
         }
 
-        match build_cfg(&project.binary, function_start, options) {
-            Ok(graph) => {
-                stats.functions += 1;
-                stats.blocks += graph.blocks.len();
-                stats.edges += graph.edges.len();
-                record_cfg(project, &graph);
-            }
-            Err(error) => {
-                stats.skipped += 1;
-                stats
-                    .warnings
-                    .push(format!("CFG skipped for {function_start}: {error}"));
-            }
+        if promoted == 0 && cfgs_recorded == 0 {
+            break;
+        }
+        if iteration + 1 == MAX_FUNCTION_CFG_ITERATIONS {
+            stats.warnings.push(format!(
+                "function CFG expansion stopped after {MAX_FUNCTION_CFG_ITERATIONS} iterations"
+            ));
         }
     }
 
     stats
+}
+
+fn promote_direct_call_target_functions(project: &mut Project) -> usize {
+    let call_targets = project
+        .xrefs()
+        .iter()
+        .filter(|xref| xref.kind == CrossReferenceKind::Call)
+        .map(|xref| xref.to)
+        .collect::<BTreeSet<_>>();
+    let mut promoted = 0_usize;
+
+    for target in call_targets {
+        if project.function(target).is_some() || !is_executable_mapped(&project.binary, target) {
+            continue;
+        }
+        project.add_function(target);
+        promoted += 1;
+    }
+
+    promoted
 }
 
 pub fn record_data_references(project: &mut Project) -> Result<DataReferenceStats> {
@@ -1352,6 +1404,41 @@ mod tests {
             from: Address::new(0xa006),
             to: Address::new(0xa006),
             kind: CrossReferenceKind::Flow,
+        }));
+    }
+
+    #[test]
+    fn expands_transitive_direct_call_targets_to_fixed_point() {
+        let binary = test_binary(
+            Address::new(0xb000),
+            vec![
+                0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xc3,
+            ],
+            ArchitectureId::X86_64,
+        );
+        let mut project = Project::from_loaded_binary(binary);
+
+        let reports = run_default_passes(&mut project, AnalysisConfig::default())
+            .expect("run default passes");
+        let function_cfg = reports
+            .iter()
+            .find(|report| report.pass_name == "function-cfg")
+            .expect("function cfg report");
+
+        assert!(function_cfg.warnings.is_empty());
+        assert!(project.function(Address::new(0xb006)).is_some());
+        assert!(project.function(Address::new(0xb00c)).is_some());
+        assert!(project.basic_block(Address::new(0xb006)).is_some());
+        assert!(project.basic_block(Address::new(0xb00c)).is_some());
+        assert!(project.xrefs().contains(&CrossReference {
+            from: Address::new(0xb006),
+            to: Address::new(0xb00c),
+            kind: CrossReferenceKind::Call,
+        }));
+        assert!(project.analysis_facts().iter().any(|fact| {
+            fact.namespace == "function-cfg"
+                && fact.key == "promoted_call_targets"
+                && fact.value == "1"
         }));
     }
 

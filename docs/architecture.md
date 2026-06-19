@@ -115,9 +115,9 @@ pub trait AnalysisPass {
 ```
 
 Current default passes cover string extraction, entrypoint function seeding,
-entrypoint CFG construction, conservative function discovery, bounded CFG
-construction for discovered functions, conservative RIP-relative data/string
-reference discovery, and cross-reference summarization.
+entrypoint CFG construction, conservative function discovery, bounded
+fixed-point CFG construction for direct-call-reachable functions, conservative
+RIP-relative data/string reference discovery, and cross-reference summarization.
 
 ## CFG Model
 
@@ -157,10 +157,11 @@ populate `ProjectString` facts, CFG analysis can populate function, block, edge,
 and flow/call cross-reference facts, function discovery can promote
 entrypoints, loader symbols, exports, and direct call targets into project
 functions when they point into executable mapped memory, function CFG analysis
-can build bounded direct-branch graphs for functions that do not already have a
-starting block, and data-reference analysis can record mapped RIP-relative
-`lea`/`mov` references from decoded x86-64 basic blocks. Later phases can add
-persistence and richer xref provenance on top of this model.
+can iteratively promote direct call targets and build bounded direct-branch
+graphs for functions that do not already have a starting block, and
+data-reference analysis can record mapped RIP-relative `lea`/`mov` references
+from decoded x86-64 basic blocks. Later phases can add persistence and richer
+xref provenance on top of this model.
 
 ## IR And Lifting Model
 
@@ -177,12 +178,13 @@ usable without claiming complete x86 semantics.
 The analysis crate now defines an `AnalysisPass` trait and a small default
 runner. The default runner records strings, discovers an entrypoint function
 when one exists, attempts an entrypoint CFG, promotes conservative function
-seeds from loader symbols, exports, and direct call targets, builds bounded CFGs
-for discovered functions that do not already have a starting block, records
-conservative RIP-relative data/string cross-references from decoded x86-64
-basic blocks, and summarizes cross-references. CFG failures from unsupported
-architectures are reported as warnings so raw or unsupported files can still
-produce a useful analysis summary.
+seeds from loader symbols, exports, and direct call targets, iterates bounded
+direct-call target promotion with CFG construction for functions that do not
+already have a starting block, records conservative RIP-relative data/string
+cross-references from decoded x86-64 basic blocks, and summarizes
+cross-references. CFG failures from unsupported architectures are reported as
+warnings so raw or unsupported files can still produce a useful analysis
+summary.
 
 ## Plugin And Scripting Boundaries
 

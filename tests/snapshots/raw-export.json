@@ -21,7 +21,7 @@
     "functions": 0,
     "blocks": 0,
     "xrefs": 0,
-    "analysis_facts": 11
+    "analysis_facts": 12
   },
   "functions": [],
   "blocks": [],
@@ -70,6 +70,11 @@
     {
       "namespace": "function-cfg",
       "key": "functions",
+      "value": "0"
+    },
+    {
+      "namespace": "function-cfg",
+      "key": "promoted_call_targets",
       "value": "0"
     },
     {

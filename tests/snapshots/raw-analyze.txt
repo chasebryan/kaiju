@@ -8,7 +8,7 @@ Strings: 1
 Functions: 0
 Blocks: 0
 Xrefs: 0
-AnalysisFacts: 11
+AnalysisFacts: 12
 Reports:
 - strings facts=1 warnings=0
 - entrypoint-function facts=0 warnings=1

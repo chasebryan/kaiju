@@ -56,7 +56,7 @@ scripting runtime, or decompiler work:
 - `kaiju-arch` built-in architecture descriptors.
 - project summaries, query APIs, and deterministic JSON export.
 - CLI `export`, `functions`, `xrefs`, and `arch` commands.
-- conservative function discovery, bounded CFGs for discovered functions, and
+- conservative function discovery, bounded direct-call CFG expansion, and
   RIP-relative data/string xrefs.
 - documented future boundaries for GUI, plugins, scripting, fuzzing, snapshots,
   and release readiness.

@@ -164,6 +164,12 @@ data-flow analysis, pointer tracking, or complete instruction coverage.
 The multi-function CFG slice added a bounded default analysis pass that builds
 direct-branch CFGs for discovered functions that do not already have a starting
 block. This lets direct call targets receive block summaries, flow xrefs, and
-downstream data-reference analysis without claiming prologue scanning,
-recursive whole-program recovery, indirect call resolution, or jump-table
-handling.
+downstream data-reference analysis without claiming prologue scanning, indirect
+call resolution, or jump-table handling.
+
+The direct-call fixed-point slice extended function CFG analysis so newly
+recorded direct call xrefs can promote additional executable function starts and
+receive their own bounded CFGs before downstream xref summarization. This
+supports conservative transitive direct-call trees without claiming recursive
+whole-program recovery, indirect-call recovery, prologue scanning, or complete
+instruction coverage.

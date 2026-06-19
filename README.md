@@ -45,7 +45,7 @@ what works:
 - direct-branch CFGs
 - conservative function discovery from entrypoints, loader metadata, and direct
   call targets
-- bounded CFG analysis for discovered x86-64 functions
+- bounded direct-call CFG expansion for x86-64 functions
 - conservative RIP-relative data and string cross-references from decoded
   x86-64 basic blocks
 - project JSON export

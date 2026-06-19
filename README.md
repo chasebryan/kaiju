@@ -5,166 +5,48 @@
   </g>
 </svg>
 
-## Project Status Addendum
+# Kaiju RE
 
-Kaiju RE is an early Rust-first reverse-engineering workbench foundation.
-The long-term goal is a modular, headless-first binary analysis platform with
-clean loader, memory map, disassembly, CFG, IR, analysis, plugin, and future GUI
-layers.
+monster-class binary analysis.
 
-Tagline: Kaiju RE - monster-class binary analysis.
+rust first. headless first. no fake decompiler magic.
 
-## Current Status
+kaiju is the beginning of a reverse-engineering workbench:
+load bytes, name the format, map memory, pull strings, decode a little code,
+draw a small CFG, and save the facts in a plain project snapshot.
 
-This repository is in an early headless foundation stage. The current local
-implementation includes the Phase 0-13 core path plus later Phase 14-45
-scaffolding slices documented below.
+it is early.
 
-Implemented:
+what works:
 
-- Cargo workspace layout.
-- Core address, range, endian, permission, error, and memory map types.
-- Basic format detection for ELF, PE, and Mach-O magic values.
-- Limited ELF metadata loading for class, endian, machine architecture,
-  entrypoint, section headers, and `PT_LOAD` memory regions.
-- Limited PE metadata loading for PE32/PE32+, machine architecture, image base,
-  entrypoint, section headers, and section-backed memory regions.
-- ASCII and UTF-16LE strings extraction with file offsets and mapped virtual
-  addresses where available.
-- A backend-independent disassembly model with a minimal x86-64 decoder subset
-  for common prologue, movement, arithmetic, branch, call, and return opcodes.
-- Basic recursive-descent CFG generation for direct jumps, conditional jumps,
-  fallthroughs, calls, returns, traps, and unknown instructions.
-- Raw loader fallback for unknown files.
-- `kaiju info <file>`.
-- `kaiju map <file>`.
-- `kaiju strings <file> [--min-len N]`.
-- `kaiju disasm <file> (--entry | --addr ADDRESS) [--count N]`.
-- `kaiju cfg <file> (--entry | --addr ADDRESS) [--format text|dot]`.
+- raw loading
+- ELF / PE / Mach-O sniffing
+- limited ELF and PE metadata
+- memory maps
+- strings
+- loader diagnostics
+- small x86-64 disassembly
+- direct-branch CFGs
+- project JSON export
 
-Not implemented yet:
-
-- Full ELF, PE, or Mach-O parsing.
-- Mach-O metadata extraction.
-- Full x86-64 disassembly coverage.
-- Non-x86-64 disassembly.
-- Indirect jump recovery and advanced CFG cleanup.
-- IR lifting.
-- GUI or dynamic plugin execution.
-
-Mach-O inputs are detected but still exposed only as conservative file-backed
-bytes until a dedicated parser is added.
-
-## Build
+try:
 
 ```bash
-cargo build --workspace
-```
-
-## Test
-
-```bash
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-```
-
-## CLI Examples
-
-```bash
 cargo run -p kaiju-cli -- info tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- map tests/fixtures/raw.bin
-cargo run -p kaiju-cli -- strings tests/fixtures/raw.bin
-cargo run -p kaiju-cli -- disasm path/to/x86_64.bin --entry --count 16
-cargo run -p kaiju-cli -- cfg path/to/x86_64.bin --entry --format dot
-```
-
-## License
-
-Apache-2.0. See `LICENSE` and `NOTICE`.
-
-## Safety
-
-Kaiju parses untrusted binaries. Parser and loader paths must return explicit
-errors instead of panicking on malformed input.
-
-## Phase 8 Addendum
-
-Phase 8 adds an in-memory project state model. The `kaiju-project` crate now
-stores loaded-binary metadata, labels, comments, discovered functions, basic
-blocks, CFG edges, extracted strings, symbols, cross-references, and simple
-analysis facts. Existing strings and CFG analysis can now record their results
-into project state for later `analyze`, IR, xref, serialization, and GUI work.
-
-## Phase 9-13 Addendum
-
-Kaiju now includes an initial IR crate, a minimal x86-64 lifter, default
-analysis-pass infrastructure, a plugin API skeleton, and a scripting plan.
-
-Additional commands:
-
-```bash
-cargo run -p kaiju-cli -- lift path/to/x86_64.bin --entry --count 16
-cargo run -p kaiju-cli -- analyze tests/fixtures/raw.bin
-```
-
-The plugin and scripting work is boundary-setting only. There is no dynamic
-plugin loading or script execution yet.
-
-## Phase 14-45 Addendum
-
-Kaiju now has a source-tracked Phase 14-45 roadmap in
-`docs/phase-14-45.md`. The safe headless pieces from that stretch include:
-
-- a `kaiju-arch` crate with built-in architecture descriptors
-- project summary and query APIs
-- deterministic `kaiju.project.v1` JSON snapshots
-- read-only CLI fact views
-- fuzzing, project-format, GUI, plugin, and scripting boundary docs
-
-Additional commands:
-
-```bash
-cargo run -p kaiju-cli -- export tests/fixtures/raw.bin
-cargo run -p kaiju-cli -- functions path/to/x86_64.bin
-cargo run -p kaiju-cli -- xrefs path/to/x86_64.bin
-cargo run -p kaiju-cli -- arch
-```
-
-Dynamic plugin loading, script execution, full project persistence, GUI work,
-and decompiler claims remain intentionally deferred.
-
-## Examples Addendum
-
-The workspace now includes library-consumer examples:
-
-```bash
-cargo run -p kaiju-example-basic-load -- tests/fixtures/raw.bin
-cargo run -p kaiju-example-basic-disasm -- path/to/x86_64.bin 16
-```
-
-The loader model is documented in `docs/loader-model.md`.
-
-## CI And Release Addendum
-
-The repository includes a GitHub Actions quality gate at
-`.github/workflows/ci.yml`. Release readiness is tracked in
-`docs/release-checklist.md`.
-
-## Snapshot Testing Addendum
-
-Stable CLI output snapshots live under `tests/snapshots/`. The snapshot testing
-model is documented in `docs/snapshot-testing.md`.
-
-## Loader Diagnostics Addendum
-
-Loader diagnostics are now available as a separate read-only CLI surface:
-
-```bash
 cargo run -p kaiju-cli -- diagnostics tests/fixtures/raw.bin
 ```
 
-Diagnostics report conservative loader behavior such as raw fallback loading,
-detection-only Mach-O handling, and limited ELF/PE metadata coverage without
-changing the stable `info` or `map` summaries. Deterministic project export now
-also includes loader diagnostics for headless automation.
+not yet:
+
+- full parsers
+- full disassembly
+- lifting worth bragging about
+- decompiler
+- GUI
+- plugin runtime
+
+the rule: build the foundation before the monster suit.
+
+Apache-2.0.

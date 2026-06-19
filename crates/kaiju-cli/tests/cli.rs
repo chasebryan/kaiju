@@ -553,7 +553,7 @@ fn cli_analyze_reports_project_summary() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
-    assert!(stdout.contains("Passes: 4"));
+    assert!(stdout.contains("Passes: 5"));
     assert!(stdout.contains("Dependencies: 0"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
@@ -562,6 +562,7 @@ fn cli_analyze_reports_project_summary() {
     assert!(stdout.contains("Blocks:"));
     assert!(stdout.contains("Xrefs:"));
     assert!(stdout.contains("entrypoint-cfg"));
+    assert!(stdout.contains("function-discovery"));
 
     let _ = fs::remove_file(path);
 }
@@ -576,7 +577,7 @@ fn cli_analyze_raw_fixture_succeeds_with_warnings() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
-    assert!(stdout.contains("Passes: 4"));
+    assert!(stdout.contains("Passes: 5"));
     assert!(stdout.contains("Dependencies: 0"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
@@ -618,6 +619,37 @@ fn cli_functions_reports_discovered_entrypoint_function() {
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
     assert!(stdout.contains("Start  Name  Blocks"));
     assert!(stdout.contains("0x0000000000401000"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn cli_functions_reports_direct_call_target_functions() {
+    let path = write_temp_call_elf_fixture();
+
+    let functions = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("functions")
+        .arg(&path)
+        .output()
+        .expect("run kaiju functions");
+
+    assert!(functions.status.success());
+    let stdout = String::from_utf8(functions.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Start  Name  Blocks"));
+    assert!(stdout.contains("0x0000000000401000"));
+    assert!(stdout.contains("0x0000000000401006"));
+
+    let xrefs = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("xrefs")
+        .arg(&path)
+        .output()
+        .expect("run kaiju xrefs");
+
+    assert!(xrefs.status.success());
+    let stdout = String::from_utf8(xrefs.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("0x0000000000401000"));
+    assert!(stdout.contains("0x0000000000401006"));
+    assert!(stdout.contains("call"));
 
     let _ = fs::remove_file(path);
 }
@@ -960,6 +992,17 @@ fn write_temp_cfg_elf_fixture() -> PathBuf {
     path
 }
 
+fn write_temp_call_elf_fixture() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    let path =
+        std::env::temp_dir().join(format!("kaiju-cli-call-elf-{}-{unique}.bin", process::id()));
+    fs::write(&path, synthetic_call_elf64_le()).expect("write call ELF fixture");
+    path
+}
+
 fn write_temp_elf_dynamic_fixture() -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1099,6 +1142,10 @@ fn synthetic_elf64_le() -> Vec<u8> {
 
 fn synthetic_cfg_elf64_le() -> Vec<u8> {
     synthetic_elf64_le_with_code(&[0x75, 0x02, 0xc3, 0x90, 0xc3])
+}
+
+fn synthetic_call_elf64_le() -> Vec<u8> {
+    synthetic_elf64_le_with_code(&[0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xc3])
 }
 
 fn synthetic_elf64_le_with_code(code: &[u8]) -> Vec<u8> {

@@ -43,6 +43,8 @@ what works:
 - loader diagnostics
 - small x86-64 disassembly
 - direct-branch CFGs
+- conservative function discovery from entrypoints, loader metadata, and direct
+  call targets
 - project JSON export
 
 try:

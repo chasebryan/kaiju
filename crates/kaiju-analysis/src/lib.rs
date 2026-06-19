@@ -98,6 +98,7 @@ pub fn default_analysis_passes(config: AnalysisConfig) -> Vec<Box<dyn AnalysisPa
         Box::new(EntrypointCfgPass {
             options: config.cfg_options,
         }),
+        Box::new(FunctionDiscoveryPass),
         Box::new(CrossReferenceSummaryPass),
     ]
 }
@@ -213,6 +214,59 @@ impl AnalysisPass for CrossReferenceSummaryPass {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FunctionDiscoveryPass;
+
+impl AnalysisPass for FunctionDiscoveryPass {
+    fn name(&self) -> &'static str {
+        "function-discovery"
+    }
+
+    fn run(&self, project: &mut Project) -> Result<AnalysisReport> {
+        let seeds = discover_function_seeds(project);
+        let mut facts_added = 0;
+        let mut symbol_seeds = 0_usize;
+        let mut export_seeds = 0_usize;
+        let mut call_target_seeds = 0_usize;
+
+        for seed in seeds {
+            let existed = project.function(seed.address).is_some();
+            let function = project.add_function(seed.address);
+            if function.name.is_none() {
+                if let Some(name) = seed.name {
+                    function.set_name(name);
+                }
+            }
+            if !existed {
+                facts_added += 1;
+            }
+            match seed.source {
+                FunctionSeedSource::Symbol => symbol_seeds += 1,
+                FunctionSeedSource::Export => export_seeds += 1,
+                FunctionSeedSource::CallTarget => call_target_seeds += 1,
+            }
+        }
+
+        project.add_analysis_fact(kaiju_project::AnalysisFact::new(
+            self.name(),
+            "symbols",
+            symbol_seeds.to_string(),
+        ));
+        project.add_analysis_fact(kaiju_project::AnalysisFact::new(
+            self.name(),
+            "exports",
+            export_seeds.to_string(),
+        ));
+        project.add_analysis_fact(kaiju_project::AnalysisFact::new(
+            self.name(),
+            "call_targets",
+            call_target_seeds.to_string(),
+        ));
+
+        Ok(AnalysisReport::new(self.name()).with_facts(facts_added))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlFlowGraph {
     pub function_start: Address,
@@ -258,6 +312,20 @@ impl Default for CfgOptions {
             max_blocks: 128,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FunctionSeed {
+    address: Address,
+    name: Option<String>,
+    source: FunctionSeedSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FunctionSeedSource {
+    Symbol,
+    Export,
+    CallTarget,
 }
 
 pub fn build_cfg(
@@ -446,6 +514,74 @@ pub fn record_cfg(project: &mut Project, graph: &ControlFlowGraph) {
     });
 }
 
+fn discover_function_seeds(project: &Project) -> Vec<FunctionSeed> {
+    let mut seeds = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for symbol in project.symbols() {
+        let Some(address) = symbol.address else {
+            continue;
+        };
+        push_function_seed(
+            project,
+            &mut seeds,
+            &mut seen,
+            address,
+            Some(symbol.name.clone()),
+            FunctionSeedSource::Symbol,
+        );
+    }
+
+    for export in project.exports() {
+        let Some(address) = export.address else {
+            continue;
+        };
+        push_function_seed(
+            project,
+            &mut seeds,
+            &mut seen,
+            address,
+            export.name.clone(),
+            FunctionSeedSource::Export,
+        );
+    }
+
+    for xref in project.xrefs() {
+        if xref.kind != kaiju_project::CrossReferenceKind::Call {
+            continue;
+        }
+        push_function_seed(
+            project,
+            &mut seeds,
+            &mut seen,
+            xref.to,
+            None,
+            FunctionSeedSource::CallTarget,
+        );
+    }
+
+    seeds.sort_by_key(|seed| (seed.address, seed.source));
+    seeds
+}
+
+fn push_function_seed(
+    project: &Project,
+    seeds: &mut Vec<FunctionSeed>,
+    seen: &mut BTreeSet<(Address, FunctionSeedSource)>,
+    address: Address,
+    name: Option<String>,
+    source: FunctionSeedSource,
+) {
+    if !is_executable_mapped(&project.binary, address) || !seen.insert((address, source)) {
+        return;
+    }
+    seeds.push(FunctionSeed {
+        address,
+        name,
+        source,
+    });
+}
+
 fn read_instruction_window(binary: &LoadedBinary, address: Address) -> Result<Vec<u8>> {
     let region = binary.memory_map.find_region(address).ok_or_else(|| {
         KaijuError::new(
@@ -491,6 +627,13 @@ fn ensure_mapped(binary: &LoadedBinary, address: Address) -> Result<()> {
 
 fn is_mapped(binary: &LoadedBinary, address: Address) -> bool {
     binary.memory_map.find_region(address).is_some()
+}
+
+fn is_executable_mapped(binary: &LoadedBinary, address: Address) -> bool {
+    binary
+        .memory_map
+        .find_region(address)
+        .is_some_and(|region| region.permissions.execute)
 }
 
 fn enqueue_if_mapped(
@@ -634,7 +777,7 @@ fn project_cfg_edge_kind(kind: EdgeKind) -> ProjectCfgEdgeKind {
 mod tests {
     use super::*;
     use kaiju_core::{Address, ArchitectureId, Endian, MemoryMap, MemoryRegion, Permissions};
-    use kaiju_loader::{load_bytes, BinaryFormat};
+    use kaiju_loader::{load_bytes, BinaryFormat, Export, Symbol};
     use kaiju_project::{CrossReference, CrossReferenceKind, Project, ProjectStringEncoding};
     use std::path::PathBuf;
 
@@ -850,14 +993,71 @@ mod tests {
         let reports = run_default_passes(&mut project, AnalysisConfig::default())
             .expect("run default passes");
 
-        assert_eq!(reports.len(), 4);
+        assert_eq!(reports.len(), 5);
         assert!(project.function(Address::new(0x6000)).is_some());
         assert!(!project.basic_blocks().is_empty());
         assert!(!project.xrefs().is_empty());
         assert!(project
             .analysis_facts()
             .iter()
+            .any(|fact| fact.namespace == "function-discovery"));
+        assert!(project
+            .analysis_facts()
+            .iter()
             .any(|fact| fact.namespace == "xref-summary"));
+    }
+
+    #[test]
+    fn function_discovery_promotes_symbol_export_and_call_seeds() {
+        let mut binary = test_binary(
+            Address::new(0x8000),
+            vec![0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xc3],
+            ArchitectureId::X86_64,
+        );
+        binary.symbols.push(Symbol {
+            name: "symbol_func".to_string(),
+            address: Some(Address::new(0x8000)),
+        });
+        binary.exports.push(Export {
+            module: Some("sample".to_string()),
+            name: Some("export_func".to_string()),
+            ordinal: 1,
+            address: Some(Address::new(0x8006)),
+            forwarder: None,
+        });
+        let mut project = Project::from_loaded_binary(binary);
+
+        let reports = run_default_passes(&mut project, AnalysisConfig::default())
+            .expect("run default passes");
+        let discovery = reports
+            .iter()
+            .find(|report| report.pass_name == "function-discovery")
+            .expect("function discovery report");
+
+        assert_eq!(discovery.facts_added, 1);
+        assert_eq!(
+            project
+                .function(Address::new(0x8000))
+                .and_then(|function| function.name.as_deref()),
+            Some("symbol_func")
+        );
+        assert!(project.function(Address::new(0x8006)).is_some());
+        assert!(project.xrefs().contains(&CrossReference {
+            from: Address::new(0x8000),
+            to: Address::new(0x8006),
+            kind: CrossReferenceKind::Call,
+        }));
+        assert!(project.analysis_facts().iter().any(|fact| {
+            fact.namespace == "function-discovery" && fact.key == "symbols" && fact.value == "1"
+        }));
+        assert!(project.analysis_facts().iter().any(|fact| {
+            fact.namespace == "function-discovery" && fact.key == "exports" && fact.value == "1"
+        }));
+        assert!(project.analysis_facts().iter().any(|fact| {
+            fact.namespace == "function-discovery"
+                && fact.key == "call_targets"
+                && fact.value == "1"
+        }));
     }
 
     #[test]
@@ -876,8 +1076,13 @@ mod tests {
             .iter()
             .find(|report| report.pass_name == "entrypoint-cfg")
             .expect("cfg report");
+        let discovery_report = reports
+            .iter()
+            .find(|report| report.pass_name == "function-discovery")
+            .expect("function discovery report");
 
         assert!(!cfg_report.warnings.is_empty());
+        assert_eq!(discovery_report.facts_added, 0);
         assert_eq!(project.strings().len(), 1);
         assert!(project.function(Address::new(0x7000)).is_some());
     }

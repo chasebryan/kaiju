@@ -147,3 +147,9 @@ The network capability slice added a dependency-free `kaiju-network` crate plus
 services, directed edges, and bounded payload summaries from authorized text
 evidence, classic PCAP captures, and explicit TCP socket probes without adding
 ambient discovery or privileged live interface sniffing.
+
+The function discovery slice added a conservative default analysis pass that
+promotes executable entrypoints, loader symbols, exports, and direct call
+targets into project functions, records seed-source counts, and exposes the
+results through existing `analyze`, `functions`, `xrefs`, and project JSON
+surfaces without claiming recursive whole-program recovery.

@@ -20,7 +20,8 @@ The command loads a binary, runs the default analysis passes, and prints a
 - loader imports
 - loader exports
 - loader relocations
-- discovered functions
+- discovered functions from entrypoints, loader metadata, and direct call
+  targets
 - basic block summaries
 - extracted strings
 - cross-references

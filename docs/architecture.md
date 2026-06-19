@@ -105,7 +105,7 @@ keeping the normalized instruction model stable.
 
 ## Analysis Pass Model
 
-The analysis framework is planned as explicit passes over a project:
+The analysis framework is built around explicit passes over a project:
 
 ```rust
 pub trait AnalysisPass {
@@ -114,8 +114,9 @@ pub trait AnalysisPass {
 }
 ```
 
-The first passes will cover strings, entrypoint disassembly, CFG construction,
-function discovery, and cross-reference discovery.
+Current default passes cover string extraction, entrypoint function seeding,
+entrypoint CFG construction, conservative function discovery, and
+cross-reference summarization.
 
 ## CFG Model
 
@@ -151,9 +152,11 @@ Current project facts include:
 - small namespaced analysis facts
 
 Analysis crates record into this model through adapters. Strings analysis can
-populate `ProjectString` facts, and CFG analysis can populate function, block,
-edge, and flow/call cross-reference facts. Later phases can add persistence,
-default analysis passes, and richer xref provenance on top of this model.
+populate `ProjectString` facts, CFG analysis can populate function, block, edge,
+and flow/call cross-reference facts, and function discovery can promote
+entrypoints, loader symbols, exports, and direct call targets into project
+functions when they point into executable mapped memory. Later phases can add
+persistence and richer xref provenance on top of this model.
 
 ## IR And Lifting Model
 
@@ -169,9 +172,11 @@ usable without claiming complete x86 semantics.
 
 The analysis crate now defines an `AnalysisPass` trait and a small default
 runner. The default runner records strings, discovers an entrypoint function
-when one exists, attempts an entrypoint CFG, and summarizes cross-references.
-CFG failures from unsupported architectures are reported as warnings so raw or
-unsupported files can still produce a useful analysis summary.
+when one exists, attempts an entrypoint CFG, promotes conservative function
+seeds from loader symbols, exports, and direct call targets, and summarizes
+cross-references. CFG failures from unsupported architectures are reported as
+warnings so raw or unsupported files can still produce a useful analysis
+summary.
 
 ## Plugin And Scripting Boundaries
 

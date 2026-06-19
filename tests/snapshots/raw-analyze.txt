@@ -1,6 +1,7 @@
 Path: <RAW_FIXTURE>
 Passes: 4
 Imports: 0
+Exports: 0
 Strings: 1
 Functions: 0
 Blocks: 0

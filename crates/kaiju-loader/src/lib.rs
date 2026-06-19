@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -43,6 +44,7 @@ pub struct LoadedBinary {
     pub sections: Vec<Section>,
     pub symbols: Vec<Symbol>,
     pub imports: Vec<Import>,
+    pub exports: Vec<Export>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -67,6 +69,15 @@ pub struct Import {
     pub name: Option<String>,
     pub ordinal: Option<u16>,
     pub thunk: Option<Address>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Export {
+    pub module: Option<String>,
+    pub name: Option<String>,
+    pub ordinal: u32,
+    pub address: Option<Address>,
+    pub forwarder: Option<String>,
 }
 
 pub trait Loader {
@@ -212,6 +223,7 @@ impl Loader for MachOLoader {
                     sections,
                     symbols: Vec::new(),
                     imports: Vec::new(),
+                    exports: Vec::new(),
                     diagnostics,
                 })
             }
@@ -234,9 +246,10 @@ impl Loader for PeLoader {
         let header = parse_pe_header(bytes)?;
         let sections = parse_pe_sections(bytes, &header)?;
         let imports = parse_pe_imports(bytes, &header, &sections)?;
+        let exports = parse_pe_exports(bytes, &header, &sections)?;
         let mut memory_map = MemoryMap::new();
         let mut diagnostics = vec![loader_note(
-            "PE loader uses limited metadata parsing; symbols and relocations are not yet populated",
+            "PE loader uses limited metadata parsing; COFF symbols and base relocations are not yet populated",
         )];
 
         for section in &sections {
@@ -295,6 +308,7 @@ impl Loader for PeLoader {
                 .collect(),
             symbols: Vec::new(),
             imports,
+            exports,
             diagnostics,
         })
     }
@@ -376,6 +390,7 @@ impl Loader for ElfLoader {
             sections,
             symbols,
             imports: Vec::new(),
+            exports: Vec::new(),
             diagnostics,
         })
     }
@@ -425,8 +440,13 @@ const PE32_PLUS_NUMBER_OF_RVA_AND_SIZES_OFFSET: u64 = 108;
 const PE32_DATA_DIRECTORY_OFFSET: u64 = 96;
 const PE32_PLUS_DATA_DIRECTORY_OFFSET: u64 = 112;
 const PE_DATA_DIRECTORY_SIZE: u64 = 8;
+const PE_EXPORT_DIRECTORY_INDEX: u32 = 0;
 const PE_IMPORT_DIRECTORY_INDEX: u32 = 1;
+const PE_EXPORT_DIRECTORY_SIZE: u64 = 40;
 const PE_IMPORT_DESCRIPTOR_SIZE: u64 = 20;
+const PE_EXPORT_ADDRESS_TABLE_ENTRY_SIZE: u64 = 4;
+const PE_EXPORT_NAME_POINTER_ENTRY_SIZE: u64 = 4;
+const PE_EXPORT_ORDINAL_TABLE_ENTRY_SIZE: u64 = 2;
 const PE32_IMPORT_LOOKUP_ENTRY_SIZE: u64 = 4;
 const PE32_PLUS_IMPORT_LOOKUP_ENTRY_SIZE: u64 = 8;
 const PE32_ORDINAL_FLAG: u64 = 0x8000_0000;
@@ -514,6 +534,7 @@ struct PeHeader {
     entrypoint: Option<Address>,
     section_table_offset: u64,
     section_count: u16,
+    export_directory: Option<PeDataDirectory>,
     import_directory: Option<PeDataDirectory>,
 }
 
@@ -596,6 +617,7 @@ fn load_as_single_region(
         sections: Vec::new(),
         symbols: Vec::new(),
         imports: Vec::new(),
+        exports: Vec::new(),
         diagnostics,
     }
 }
@@ -981,11 +1003,21 @@ fn parse_pe_header(bytes: &[u8]) -> Result<PeHeader> {
         u64::from(optional_header_size),
         "PE section table offset",
     )?;
-    let import_directory = parse_pe_import_directory(
+    let export_directory = parse_pe_data_directory(
         bytes,
         kind,
         optional_header_offset,
         u64::from(optional_header_size),
+        PE_EXPORT_DIRECTORY_INDEX,
+        "PE export data directory",
+    )?;
+    let import_directory = parse_pe_data_directory(
+        bytes,
+        kind,
+        optional_header_offset,
+        u64::from(optional_header_size),
+        PE_IMPORT_DIRECTORY_INDEX,
+        "PE import data directory",
     )?;
 
     Ok(PeHeader {
@@ -995,15 +1027,18 @@ fn parse_pe_header(bytes: &[u8]) -> Result<PeHeader> {
         entrypoint,
         section_table_offset,
         section_count,
+        export_directory,
         import_directory,
     })
 }
 
-fn parse_pe_import_directory(
+fn parse_pe_data_directory(
     bytes: &[u8],
     kind: PeKind,
     optional_header_offset: u64,
     optional_header_size: u64,
+    directory_index: u32,
+    context: &str,
 ) -> Result<Option<PeDataDirectory>> {
     let (number_offset, directory_offset) = match kind {
         PeKind::Pe32 => (
@@ -1026,32 +1061,32 @@ fn parse_pe_import_directory(
         Endian::Little,
         "PE number of data directories",
     )?;
-    if directory_count <= PE_IMPORT_DIRECTORY_INDEX {
+    if directory_count <= directory_index {
         return Ok(None);
     }
 
-    let import_directory_offset = directory_offset
+    let data_directory_offset = directory_offset
         .checked_add(
-            u64::from(PE_IMPORT_DIRECTORY_INDEX)
+            u64::from(directory_index)
                 .checked_mul(PE_DATA_DIRECTORY_SIZE)
-                .ok_or_else(|| malformed("PE import directory offset overflow"))?,
+                .ok_or_else(|| malformed(format!("{context} offset overflow")))?,
         )
-        .ok_or_else(|| malformed("PE import directory offset overflow"))?;
-    if optional_header_size < import_directory_offset + PE_DATA_DIRECTORY_SIZE {
-        return Err(malformed("PE import data directory is truncated"));
+        .ok_or_else(|| malformed(format!("{context} offset overflow")))?;
+    if optional_header_size < data_directory_offset + PE_DATA_DIRECTORY_SIZE {
+        return Err(malformed(format!("{context} is truncated")));
     }
 
     let rva = read_u32(
         bytes,
-        optional_header_offset + import_directory_offset,
+        optional_header_offset + data_directory_offset,
         Endian::Little,
-        "PE import directory RVA",
+        &format!("{context} RVA"),
     )?;
     let size = read_u32(
         bytes,
-        optional_header_offset + import_directory_offset + 4,
+        optional_header_offset + data_directory_offset + 4,
         Endian::Little,
-        "PE import directory size",
+        &format!("{context} size"),
     )?;
 
     if rva == 0 || size == 0 {
@@ -1154,6 +1189,238 @@ fn pe_section_name(bytes: &[u8], index: usize) -> String {
 struct PeFileLocation {
     offset: u64,
     limit: u64,
+}
+
+fn parse_pe_exports(
+    bytes: &[u8],
+    header: &PeHeader,
+    sections: &[PeSection],
+) -> Result<Vec<Export>> {
+    let Some(export_directory) = header.export_directory else {
+        return Ok(Vec::new());
+    };
+
+    let export_size = u64::from(export_directory.size);
+    if export_size < PE_EXPORT_DIRECTORY_SIZE {
+        return Err(malformed("PE export directory is too small"));
+    }
+    let directory_location = pe_rva_to_file_location(u64::from(export_directory.rva), sections)
+        .ok_or_else(|| malformed("PE export directory RVA does not map to file data"))?;
+    let directory_end = checked_add_offset(
+        directory_location.offset,
+        export_size,
+        "PE export directory",
+    )?;
+    if directory_end > directory_location.limit {
+        return Err(malformed(
+            "PE export directory extends beyond section file data",
+        ));
+    }
+    checked_range(
+        bytes,
+        directory_location.offset,
+        export_size,
+        "PE export directory",
+    )?;
+
+    let module_name_rva = read_u32(
+        bytes,
+        directory_location.offset + 12,
+        Endian::Little,
+        "PE export module name RVA",
+    )?;
+    let ordinal_base = read_u32(
+        bytes,
+        directory_location.offset + 16,
+        Endian::Little,
+        "PE export ordinal base",
+    )?;
+    let function_count = read_u32(
+        bytes,
+        directory_location.offset + 20,
+        Endian::Little,
+        "PE export address count",
+    )?;
+    let name_count = read_u32(
+        bytes,
+        directory_location.offset + 24,
+        Endian::Little,
+        "PE export name count",
+    )?;
+    let address_table_rva = read_u32(
+        bytes,
+        directory_location.offset + 28,
+        Endian::Little,
+        "PE export address table RVA",
+    )?;
+    let name_pointer_table_rva = read_u32(
+        bytes,
+        directory_location.offset + 32,
+        Endian::Little,
+        "PE export name pointer table RVA",
+    )?;
+    let ordinal_table_rva = read_u32(
+        bytes,
+        directory_location.offset + 36,
+        Endian::Little,
+        "PE export ordinal table RVA",
+    )?;
+
+    if function_count == 0 {
+        return Ok(Vec::new());
+    }
+    if address_table_rva == 0 {
+        return Err(malformed("PE export address table RVA is zero"));
+    }
+    if name_count > 0 && (name_pointer_table_rva == 0 || ordinal_table_rva == 0) {
+        return Err(malformed("PE export name or ordinal table RVA is zero"));
+    }
+
+    let module = if module_name_rva == 0 {
+        None
+    } else {
+        Some(read_pe_c_string(
+            bytes,
+            sections,
+            u64::from(module_name_rva),
+            "PE export module name",
+        )?)
+    };
+
+    let address_table = checked_pe_table(
+        bytes,
+        sections,
+        u64::from(address_table_rva),
+        function_count,
+        PE_EXPORT_ADDRESS_TABLE_ENTRY_SIZE,
+        "PE export address table",
+    )?;
+    let mut names_by_index = BTreeMap::<u32, Vec<String>>::new();
+    if name_count > 0 {
+        let name_pointer_table = checked_pe_table(
+            bytes,
+            sections,
+            u64::from(name_pointer_table_rva),
+            name_count,
+            PE_EXPORT_NAME_POINTER_ENTRY_SIZE,
+            "PE export name pointer table",
+        )?;
+        let ordinal_table = checked_pe_table(
+            bytes,
+            sections,
+            u64::from(ordinal_table_rva),
+            name_count,
+            PE_EXPORT_ORDINAL_TABLE_ENTRY_SIZE,
+            "PE export ordinal table",
+        )?;
+        for index in 0..name_count {
+            let pointer_offset = table_entry_offset_u32(
+                name_pointer_table.offset,
+                PE_EXPORT_NAME_POINTER_ENTRY_SIZE,
+                index,
+                "PE export name pointer table",
+            )?;
+            let name_rva = read_u32(bytes, pointer_offset, Endian::Little, "PE export name RVA")?;
+            let ordinal_offset = table_entry_offset_u32(
+                ordinal_table.offset,
+                PE_EXPORT_ORDINAL_TABLE_ENTRY_SIZE,
+                index,
+                "PE export ordinal table",
+            )?;
+            let function_index = u32::from(read_u16(
+                bytes,
+                ordinal_offset,
+                Endian::Little,
+                "PE export ordinal index",
+            )?);
+            if function_index >= function_count {
+                return Err(malformed("PE export ordinal index is out of range"));
+            }
+            let name = read_pe_c_string(bytes, sections, u64::from(name_rva), "PE export name")?;
+            names_by_index.entry(function_index).or_default().push(name);
+        }
+    }
+
+    let mut exports = Vec::new();
+    let export_start_rva = u64::from(export_directory.rva);
+    let export_end_rva = checked_add_offset(export_start_rva, export_size, "PE export directory")?;
+    for function_index in 0..function_count {
+        let address_offset = table_entry_offset_u32(
+            address_table.offset,
+            PE_EXPORT_ADDRESS_TABLE_ENTRY_SIZE,
+            function_index,
+            "PE export address table",
+        )?;
+        let function_rva = read_u32(
+            bytes,
+            address_offset,
+            Endian::Little,
+            "PE export function RVA",
+        )?;
+        let names = names_by_index.remove(&function_index).unwrap_or_default();
+        if function_rva == 0 && names.is_empty() {
+            continue;
+        }
+
+        let ordinal = ordinal_base
+            .checked_add(function_index)
+            .ok_or_else(|| malformed("PE export ordinal overflow"))?;
+        let (address, forwarder) = pe_export_target(
+            bytes,
+            header,
+            sections,
+            function_rva,
+            export_start_rva,
+            export_end_rva,
+        )?;
+
+        if names.is_empty() {
+            exports.push(Export {
+                module: module.clone(),
+                name: None,
+                ordinal,
+                address,
+                forwarder,
+            });
+        } else {
+            for name in names {
+                exports.push(Export {
+                    module: module.clone(),
+                    name: Some(name),
+                    ordinal,
+                    address,
+                    forwarder: forwarder.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(exports)
+}
+
+fn pe_export_target(
+    bytes: &[u8],
+    header: &PeHeader,
+    sections: &[PeSection],
+    function_rva: u32,
+    export_start_rva: u64,
+    export_end_rva: u64,
+) -> Result<(Option<Address>, Option<String>)> {
+    if function_rva == 0 {
+        return Ok((None, None));
+    }
+
+    let function_rva = u64::from(function_rva);
+    if function_rva >= export_start_rva && function_rva < export_end_rva {
+        let forwarder = read_pe_c_string(bytes, sections, function_rva, "PE export forwarder")?;
+        return Ok((None, Some(forwarder)));
+    }
+
+    let address = header
+        .image_base
+        .checked_add(function_rva)
+        .ok_or_else(|| malformed("PE export address overflow"))?;
+    Ok((Some(Address::new(address)), None))
 }
 
 fn parse_pe_imports(
@@ -1406,6 +1673,30 @@ fn read_file_c_string(bytes: &[u8], offset: u64, limit: u64, context: &str) -> R
     }
 
     Ok(String::from_utf8_lossy(name_bytes).into_owned())
+}
+
+fn checked_pe_table(
+    bytes: &[u8],
+    sections: &[PeSection],
+    rva: u64,
+    count: u32,
+    entry_size: u64,
+    context: &str,
+) -> Result<PeFileLocation> {
+    let table_size = entry_size
+        .checked_mul(u64::from(count))
+        .ok_or_else(|| malformed(format!("{context} size overflow")))?;
+    let location = pe_rva_to_file_location(rva, sections)
+        .ok_or_else(|| malformed(format!("{context} RVA does not map to file data")))?;
+    let table_end = checked_add_offset(location.offset, table_size, context)?;
+    if table_end > location.limit {
+        return Err(malformed(format!(
+            "{context} extends beyond section file data"
+        )));
+    }
+    checked_range(bytes, location.offset, table_size, context)?;
+
+    Ok(location)
 }
 
 fn pe_rva_to_file_location(rva: u64, sections: &[PeSection]) -> Option<PeFileLocation> {
@@ -2072,6 +2363,7 @@ mod tests {
         assert_eq!(binary.sections[0].address, Address::new(0x140001000));
         assert!(binary.sections[0].permissions.execute);
         assert!(binary.imports.is_empty());
+        assert!(binary.exports.is_empty());
         assert_eq!(binary.memory_map.regions().len(), 2);
 
         let text = &binary.memory_map.regions()[0];
@@ -2114,8 +2406,35 @@ mod tests {
         assert_eq!(binary.imports[1].thunk, Some(Address::new(0x1400020a8)));
         assert!(binary.diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Note
-                && diagnostic.message.contains("symbols and relocations")
+                && diagnostic
+                    .message
+                    .contains("COFF symbols and base relocations")
         }));
+    }
+
+    #[test]
+    fn loads_pe32_plus_exports_by_name_ordinal_and_forwarder() {
+        let bytes = synthetic_pe32_plus_with_exports();
+        let binary = load_bytes(PathBuf::from("sample.dll"), &bytes).expect("load PE");
+
+        assert_eq!(binary.format, BinaryFormat::Pe);
+        assert_eq!(binary.exports.len(), 3);
+        assert_eq!(binary.exports[0].module.as_deref(), Some("sample.dll"));
+        assert_eq!(binary.exports[0].name.as_deref(), Some("ExportedFunc"));
+        assert_eq!(binary.exports[0].ordinal, 1);
+        assert_eq!(binary.exports[0].address, Some(Address::new(0x140001000)));
+        assert_eq!(binary.exports[0].forwarder, None);
+        assert_eq!(binary.exports[1].name.as_deref(), Some("ForwardedFunc"));
+        assert_eq!(binary.exports[1].ordinal, 2);
+        assert_eq!(binary.exports[1].address, None);
+        assert_eq!(
+            binary.exports[1].forwarder.as_deref(),
+            Some("OTHER.Forward")
+        );
+        assert_eq!(binary.exports[2].name, None);
+        assert_eq!(binary.exports[2].ordinal, 3);
+        assert_eq!(binary.exports[2].address, Some(Address::new(0x140001010)));
+        assert_eq!(binary.exports[2].forwarder, None);
     }
 
     #[test]
@@ -2373,6 +2692,37 @@ mod tests {
         assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
     }
 
+    #[test]
+    fn pe_export_directory_outside_file_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus_with_exports();
+        let export_directory = pe32_plus_export_directory_offset();
+        write_u32_le(&mut bytes, export_directory, 0x5000);
+
+        let error = load_bytes(PathBuf::from("bad.dll"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn pe_export_name_outside_file_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus_with_exports();
+        write_u32_le(&mut bytes, 0x490, 0x5000);
+
+        let error = load_bytes(PathBuf::from("bad.dll"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn pe_export_ordinal_index_out_of_range_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus_with_exports();
+        write_u16_le(&mut bytes, 0x4a0, 9);
+
+        let error = load_bytes(PathBuf::from("bad.dll"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
     fn synthetic_pe32_plus() -> Vec<u8> {
         let mut bytes = vec![0_u8; 0x800];
         bytes[0] = b'M';
@@ -2481,6 +2831,83 @@ mod tests {
         bytes[0x4c2..0x4ce].copy_from_slice(b"ExitProcess\0");
 
         bytes
+    }
+
+    fn synthetic_pe32_plus_with_exports() -> Vec<u8> {
+        let mut bytes = vec![0_u8; 0x800];
+        bytes[0] = b'M';
+        bytes[1] = b'Z';
+        write_u32_le(&mut bytes, 0x3c, 0x100);
+        bytes[0x100..0x104].copy_from_slice(PE_SIGNATURE);
+
+        let coff = 0x104;
+        write_u16_le(&mut bytes, coff, IMAGE_FILE_MACHINE_AMD64);
+        write_u16_le(&mut bytes, coff + 2, 2);
+        write_u16_le(&mut bytes, coff + 16, 0x90);
+
+        let optional = coff + 20;
+        write_u16_le(&mut bytes, optional, PE32_PLUS_MAGIC);
+        write_u32_le(&mut bytes, optional + 16, 0x1000);
+        write_u64_le(&mut bytes, optional + 24, 0x140000000);
+        write_u32_le(&mut bytes, optional + 108, 16);
+        let export_directory = pe32_plus_export_directory_offset();
+        write_u32_le(&mut bytes, export_directory, 0x2000);
+        write_u32_le(&mut bytes, export_directory + 4, 0x100);
+
+        write_pe_section(
+            &mut bytes,
+            0x1a8,
+            PeSectionSpec {
+                name: b".text\0\0\0",
+                virtual_size: 0x100,
+                virtual_address: 0x1000,
+                raw_size: 0x200,
+                raw_offset: 0x200,
+                characteristics: IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE,
+            },
+        );
+        write_pe_section(
+            &mut bytes,
+            0x1d0,
+            PeSectionSpec {
+                name: b".rdata\0\0",
+                virtual_size: 0x200,
+                virtual_address: 0x2000,
+                raw_size: 0x200,
+                raw_offset: 0x400,
+                characteristics: IMAGE_SCN_MEM_READ,
+            },
+        );
+
+        bytes[0x200..0x204].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
+
+        write_u32_le(&mut bytes, 0x40c, 0x2060);
+        write_u32_le(&mut bytes, 0x410, 1);
+        write_u32_le(&mut bytes, 0x414, 3);
+        write_u32_le(&mut bytes, 0x418, 2);
+        write_u32_le(&mut bytes, 0x41c, 0x2080);
+        write_u32_le(&mut bytes, 0x420, 0x2090);
+        write_u32_le(&mut bytes, 0x424, 0x20a0);
+
+        bytes[0x460..0x46b].copy_from_slice(b"sample.dll\0");
+        write_u32_le(&mut bytes, 0x480, 0x1000);
+        write_u32_le(&mut bytes, 0x484, 0x20c0);
+        write_u32_le(&mut bytes, 0x488, 0x1010);
+        write_u32_le(&mut bytes, 0x490, 0x20d0);
+        write_u32_le(&mut bytes, 0x494, 0x20e0);
+        write_u16_le(&mut bytes, 0x4a0, 0);
+        write_u16_le(&mut bytes, 0x4a2, 1);
+        bytes[0x4c0..0x4ce].copy_from_slice(b"OTHER.Forward\0");
+        bytes[0x4d0..0x4dd].copy_from_slice(b"ExportedFunc\0");
+        bytes[0x4e0..0x4ee].copy_from_slice(b"ForwardedFunc\0");
+
+        bytes
+    }
+
+    fn pe32_plus_export_directory_offset() -> usize {
+        0x118
+            + PE32_PLUS_DATA_DIRECTORY_OFFSET as usize
+            + (PE_EXPORT_DIRECTORY_INDEX as usize * PE_DATA_DIRECTORY_SIZE as usize)
     }
 
     fn pe32_plus_import_directory_offset() -> usize {

@@ -27,6 +27,8 @@ binaries. The default stance is defensive parsing.
 - Raw fallback for unknown files.
 - Unit and integration tests for malformed-adjacent boundaries.
 - Bounded PE import descriptor, thunk, DLL-name, and import-name parsing tests.
+- Bounded PE export directory, address-table, name-table, ordinal-table, and
+  forwarder parsing tests.
 
 ## Required Rules
 

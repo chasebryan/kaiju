@@ -247,6 +247,7 @@ mod tests {
             sections: Vec::new(),
             symbols: Vec::new(),
             imports: Vec::new(),
+            exports: Vec::new(),
             diagnostics: Vec::new(),
         }
     }

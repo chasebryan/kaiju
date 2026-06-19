@@ -11,6 +11,7 @@ Current snapshots live under `tests/snapshots/` and cover:
 - raw `analyze`
 - raw `export`
 - raw `imports`
+- raw `exports`
 - built-in `arch`
 
 The CLI integration tests normalize the raw fixture path to `<RAW_FIXTURE>` so

@@ -13,6 +13,7 @@
     "sections": 0,
     "symbols": 0,
     "imports": 0,
+    "exports": 0,
     "diagnostics": 1,
     "strings": 1,
     "functions": 0,
@@ -30,6 +31,7 @@
   ],
   "symbols": [],
   "imports": [],
+  "exports": [],
   "strings": [
     {
       "file_offset": 0,

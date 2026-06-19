@@ -133,6 +133,12 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), CliError> {
             print_imports(&binary);
             Ok(())
         }
+        "exports" => {
+            let path = read_single_path_arg(&mut args, "exports")?;
+            let binary = load_path(path)?;
+            print_exports(&binary);
+            Ok(())
+        }
         "xrefs" => {
             let path = read_single_path_arg(&mut args, "xrefs")?;
             let (project, _reports) = analyze_project(path)?;
@@ -465,6 +471,7 @@ fn print_usage() {
     eprintln!("  kaiju functions <file>");
     eprintln!("  kaiju symbols <file>");
     eprintln!("  kaiju imports <file>");
+    eprintln!("  kaiju exports <file>");
     eprintln!("  kaiju xrefs <file>");
     eprintln!("  kaiju arch");
 }
@@ -484,6 +491,7 @@ fn print_info(binary: &LoadedBinary) {
     println!("Sections: {}", binary.sections.len());
     println!("Symbols: {}", binary.symbols.len());
     println!("Imports: {}", binary.imports.len());
+    println!("Exports: {}", binary.exports.len());
 }
 
 fn print_map(binary: &LoadedBinary) {
@@ -538,6 +546,23 @@ fn print_imports(binary: &LoadedBinary) {
         println!(
             "{:<20} {:<24} {:<8} {}",
             import.library, name, ordinal, thunk
+        );
+    }
+}
+
+fn print_exports(binary: &LoadedBinary) {
+    println!("Module  Name  Ordinal  Address  Forwarder");
+    for export in &binary.exports {
+        let module = export.module.as_deref().unwrap_or("-");
+        let name = export.name.as_deref().unwrap_or("-");
+        let address = export
+            .address
+            .map_or_else(|| "-".to_string(), |address| address.to_string());
+        let forwarder = export.forwarder.as_deref().unwrap_or("-");
+
+        println!(
+            "{:<16} {:<24} {:<8} {:<18} {}",
+            module, name, export.ordinal, address, forwarder
         );
     }
 }
@@ -756,6 +781,7 @@ fn print_analysis_summary(project: &Project, reports: &[AnalysisReport]) {
     println!("Path: {}", project.binary.path.display());
     println!("Passes: {}", reports.len());
     println!("Imports: {}", project.imports().len());
+    println!("Exports: {}", project.exports().len());
     println!("Strings: {}", project.strings().len());
     println!("Functions: {}", project.functions().len());
     println!("Blocks: {}", project.basic_blocks().len());

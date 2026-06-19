@@ -103,3 +103,9 @@ The PE import slice added bounded PE32/PE32+ import-directory parsing, named and
 ordinal import rows, malformed import-table tests, project export coverage, and
 a read-only `kaiju imports <file>` command without claiming PE exports or
 relocations.
+
+The PE export slice added bounded export-directory parsing for module names,
+named exports, ordinal-only exports, and forwarded exports, plus malformed
+export-table tests, project export coverage, and a read-only
+`kaiju exports <file>` command without claiming PE base relocations or COFF
+symbols.

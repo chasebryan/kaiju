@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use kaiju_core::{Address, DiagnosticSeverity};
-use kaiju_loader::{Import, LoadedBinary, Symbol};
+use kaiju_loader::{Export, Import, LoadedBinary, Symbol};
 
 #[derive(Debug, Clone)]
 pub struct Project {
@@ -16,6 +16,7 @@ pub struct Project {
     strings: Vec<ProjectString>,
     symbols: Vec<ProjectSymbol>,
     imports: Vec<ProjectImport>,
+    exports: Vec<ProjectExport>,
     xrefs: BTreeSet<CrossReference>,
     analysis_facts: Vec<AnalysisFact>,
 }
@@ -25,6 +26,7 @@ impl Project {
     pub fn from_loaded_binary(binary: LoadedBinary) -> Self {
         let symbols = binary.symbols.iter().map(ProjectSymbol::from).collect();
         let imports = binary.imports.iter().map(ProjectImport::from).collect();
+        let exports = binary.exports.iter().map(ProjectExport::from).collect();
 
         Self {
             binary,
@@ -36,6 +38,7 @@ impl Project {
             strings: Vec::new(),
             symbols,
             imports,
+            exports,
             xrefs: BTreeSet::new(),
             analysis_facts: Vec::new(),
         }
@@ -166,6 +169,26 @@ impl Project {
         &self.imports
     }
 
+    pub fn add_export(&mut self, export: ProjectExport) {
+        if !self.exports.contains(&export) {
+            self.exports.push(export);
+            self.exports.sort_by_key(|entry| {
+                (
+                    entry.module.clone(),
+                    entry.name.clone(),
+                    entry.ordinal,
+                    entry.address,
+                    entry.forwarder.clone(),
+                )
+            });
+        }
+    }
+
+    #[must_use]
+    pub fn exports(&self) -> &[ProjectExport] {
+        &self.exports
+    }
+
     pub fn add_xref(&mut self, xref: CrossReference) {
         self.xrefs.insert(xref);
     }
@@ -232,6 +255,7 @@ impl Project {
             section_count: self.binary.sections.len(),
             symbol_count: self.symbols.len(),
             import_count: self.imports.len(),
+            export_count: self.exports.len(),
             diagnostic_count: self.binary.diagnostics.len(),
             string_count: self.strings.len(),
             function_count: self.functions.len(),
@@ -294,6 +318,7 @@ impl Project {
         push_json_usize_field(&mut json, 4, "sections", summary.section_count, true);
         push_json_usize_field(&mut json, 4, "symbols", summary.symbol_count, true);
         push_json_usize_field(&mut json, 4, "imports", summary.import_count, true);
+        push_json_usize_field(&mut json, 4, "exports", summary.export_count, true);
         push_json_usize_field(&mut json, 4, "diagnostics", summary.diagnostic_count, true);
         push_json_usize_field(&mut json, 4, "strings", summary.string_count, true);
         push_json_usize_field(&mut json, 4, "functions", summary.function_count, true);
@@ -316,6 +341,8 @@ impl Project {
         push_symbols_json(&mut json, self);
         json.push_str(",\n");
         push_imports_json(&mut json, self);
+        json.push_str(",\n");
+        push_exports_json(&mut json, self);
         json.push_str(",\n");
         push_strings_json(&mut json, self);
         json.push_str(",\n");
@@ -340,6 +367,7 @@ pub struct ProjectSummary {
     pub section_count: usize,
     pub symbol_count: usize,
     pub import_count: usize,
+    pub export_count: usize,
     pub diagnostic_count: usize,
     pub string_count: usize,
     pub function_count: usize,
@@ -448,6 +476,27 @@ impl From<&Import> for ProjectImport {
             name: import.name.clone(),
             ordinal: import.ordinal,
             thunk: import.thunk,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectExport {
+    pub module: Option<String>,
+    pub name: Option<String>,
+    pub ordinal: u32,
+    pub address: Option<Address>,
+    pub forwarder: Option<String>,
+}
+
+impl From<&Export> for ProjectExport {
+    fn from(export: &Export) -> Self {
+        Self {
+            module: export.module.clone(),
+            name: export.name.clone(),
+            ordinal: export.ordinal,
+            address: export.address,
+            forwarder: export.forwarder.clone(),
         }
     }
 }
@@ -642,6 +691,41 @@ fn push_imports_json(json: &mut String, project: &Project) {
     json.push_str("  ]");
 }
 
+fn push_exports_json(json: &mut String, project: &Project) {
+    json.push_str("  \"exports\": [");
+    if project.exports.is_empty() {
+        json.push(']');
+        return;
+    }
+    json.push('\n');
+    for (index, export) in project.exports.iter().enumerate() {
+        let comma = if index + 1 == project.exports.len() {
+            ""
+        } else {
+            ","
+        };
+        json.push_str("    {\n");
+        match &export.module {
+            Some(module) => push_json_field(json, 6, "module", module, true),
+            None => push_json_null_field(json, 6, "module", true),
+        }
+        match &export.name {
+            Some(name) => push_json_field(json, 6, "name", name, true),
+            None => push_json_null_field(json, 6, "name", true),
+        }
+        push_json_u32_field(json, 6, "ordinal", export.ordinal, true);
+        push_json_address_field(json, 6, "address", export.address, true);
+        match &export.forwarder {
+            Some(forwarder) => push_json_field(json, 6, "forwarder", forwarder, false),
+            None => push_json_null_field(json, 6, "forwarder", false),
+        }
+        json.push_str("    }");
+        json.push_str(comma);
+        json.push('\n');
+    }
+    json.push_str("  ]");
+}
+
 fn push_strings_json(json: &mut String, project: &Project) {
     json.push_str("  \"strings\": [");
     if project.strings.is_empty() {
@@ -757,6 +841,21 @@ fn push_json_usize_field(
     indent: usize,
     name: &str,
     value: usize,
+    trailing_comma: bool,
+) {
+    push_indent(json, indent);
+    json.push('"');
+    json.push_str(name);
+    json.push_str("\": ");
+    json.push_str(&value.to_string());
+    push_comma_newline(json, trailing_comma);
+}
+
+fn push_json_u32_field(
+    json: &mut String,
+    indent: usize,
+    name: &str,
+    value: u32,
     trailing_comma: bool,
 ) {
     push_indent(json, indent);
@@ -956,6 +1055,51 @@ mod tests {
     }
 
     #[test]
+    fn creates_project_from_loaded_binary_and_preserves_exports() {
+        let mut binary = test_binary();
+        binary.exports.push(Export {
+            module: Some("sample.dll".to_string()),
+            name: Some("ExportedFunc".to_string()),
+            ordinal: 1,
+            address: Some(Address::new(0x140001000)),
+            forwarder: None,
+        });
+        binary.exports.push(Export {
+            module: Some("sample.dll".to_string()),
+            name: Some("ForwardedFunc".to_string()),
+            ordinal: 2,
+            address: None,
+            forwarder: Some("OTHER.Forward".to_string()),
+        });
+        binary.exports.push(Export {
+            module: Some("sample.dll".to_string()),
+            name: None,
+            ordinal: 3,
+            address: Some(Address::new(0x140001010)),
+            forwarder: None,
+        });
+
+        let project = Project::from_loaded_binary(binary);
+
+        assert_eq!(project.exports().len(), 3);
+        assert_eq!(project.exports()[0].module.as_deref(), Some("sample.dll"));
+        assert_eq!(project.exports()[0].name.as_deref(), Some("ExportedFunc"));
+        assert_eq!(project.exports()[0].ordinal, 1);
+        assert_eq!(
+            project.exports()[1].forwarder.as_deref(),
+            Some("OTHER.Forward")
+        );
+        assert_eq!(project.exports()[2].name, None);
+        let json = project.to_json_pretty();
+        assert!(json.contains("\"exports\": 3"));
+        assert!(json.contains("\"exports\": ["));
+        assert!(json.contains("\"module\": \"sample.dll\""));
+        assert!(json.contains("\"name\": \"ExportedFunc\""));
+        assert!(json.contains("\"ordinal\": 3"));
+        assert!(json.contains("\"forwarder\": \"OTHER.Forward\""));
+    }
+
+    #[test]
     fn stores_labels_and_comments_by_address() {
         let mut project = Project::from_loaded_binary(test_binary());
 
@@ -1054,6 +1198,7 @@ mod tests {
         assert_eq!(summary.architecture, "x86_64");
         assert_eq!(summary.region_count, 1);
         assert_eq!(summary.import_count, 0);
+        assert_eq!(summary.export_count, 0);
         assert_eq!(summary.diagnostic_count, 0);
         assert_eq!(summary.string_count, 1);
         assert_eq!(summary.function_count, 1);
@@ -1151,6 +1296,7 @@ mod tests {
             sections: Vec::new(),
             symbols: Vec::new(),
             imports: Vec::new(),
+            exports: Vec::new(),
             diagnostics: Vec::new(),
         }
     }

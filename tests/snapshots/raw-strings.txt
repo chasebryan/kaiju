@@ -1,0 +1,2 @@
+Offset  Address  Encoding  Length  Value
+0x0        0x0000000000000000 ASCII 17       Kaiju raw fixture

@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  quality-gate:
+    name: Rust quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component clippy rustfmt
+
+      - name: Use stable Rust
+        run: rustup default stable
+
+      - name: Check workspace
+        run: cargo check --workspace
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Smoke check raw fixture
+        run: |
+          cargo run -p kaiju-cli -- info tests/fixtures/raw.bin
+          cargo run -p kaiju-cli -- map tests/fixtures/raw.bin
+          cargo run -p kaiju-cli -- strings tests/fixtures/raw.bin
+          cargo run -p kaiju-cli -- analyze tests/fixtures/raw.bin
+          cargo run -p kaiju-cli -- export tests/fixtures/raw.bin
+          cargo run -p kaiju-cli -- arch

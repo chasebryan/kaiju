@@ -1,0 +1,15 @@
+[package]
+name = "kaiju-example-basic-load"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+kaiju-loader = { path = "../../crates/kaiju-loader" }
+
+[[bin]]
+name = "kaiju-example-basic-load"
+path = "src/main.rs"

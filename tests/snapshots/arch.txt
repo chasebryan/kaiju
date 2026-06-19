@@ -1,0 +1,6 @@
+Id  Name  PointerWidth  Endian  Registers
+x86  x86  32  Little  5
+x86_64  x86_64  64  Little  8
+arm  arm  32  Little  0
+aarch64  aarch64  64  Little  0
+Unknown  unknown  0  Unknown  0

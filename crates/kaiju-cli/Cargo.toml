@@ -1,0 +1,20 @@
+[package]
+name = "kaiju-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kaiju-analysis = { path = "../kaiju-analysis" }
+kaiju-arch = { path = "../kaiju-arch" }
+kaiju-core = { path = "../kaiju-core" }
+kaiju-disasm = { path = "../kaiju-disasm" }
+kaiju-ir = { path = "../kaiju-ir" }
+kaiju-loader = { path = "../kaiju-loader" }
+kaiju-project = { path = "../kaiju-project" }
+
+[[bin]]
+name = "kaiju"
+path = "src/main.rs"

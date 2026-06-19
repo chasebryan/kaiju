@@ -1,0 +1,178 @@
+# Architecture
+
+Kaiju is a Rust-first reverse-engineering framework built from small crates.
+The first target is a reliable headless pipeline:
+
+```text
+bytes -> loader -> memory map -> project state -> analysis
+```
+
+Later phases extend that path with architecture adapters, disassembly, CFG
+construction, IR lifting, scripting, plugins, and a GUI.
+
+## Crate Layout
+
+- `kaiju-core`: shared foundational types such as addresses, address ranges,
+  endian markers, permissions, memory regions, memory maps, and typed errors.
+- `kaiju-loader`: format detection, loader traits, normalized loaded-binary
+  metadata, and raw fallback loading.
+- `kaiju-analysis`: analysis helpers and passes. It currently owns strings
+  extraction for ASCII and UTF-16LE data.
+- `kaiju-disasm`: normalized disassembly traits and instruction data model. It
+  currently includes a minimal x86-64 decoder subset.
+- `kaiju-project`: in-memory project state that can hold a loaded binary and
+  analysis facts.
+- `kaiju-cli`: headless command-line interface.
+
+Future crates will split architecture modeling, disassembly, IR, analysis, and
+plugin boundaries once the loader foundation is stable.
+
+## Loader Model
+
+A file is read as bytes first. Format detection then classifies the input as
+ELF, PE, Mach-O, or unknown. Unknown files are loaded as raw bytes at virtual
+address `0x0`.
+
+ELF has a limited defensive parser for class, endian, machine architecture,
+entrypoint, program headers, section headers, section names, and `PT_LOAD`
+regions. PE has a limited defensive parser for PE32/PE32+, COFF machine,
+optional-header image base and entrypoint, section headers, section names, and
+section-backed memory regions. Mach-O is currently detection-only and is exposed
+as conservative file-backed bytes until a dedicated parser phase is implemented.
+Full parsing of symbols, relocations, imports, and format-specific edge cases is
+deferred.
+
+Loader diagnostics are attached to the normalized `LoadedBinary` model. They
+report conservative behavior such as raw fallback loading, detection-only
+Mach-O handling, limited ELF/PE metadata parsing, and file-backed fallback
+mapping when a recognized container has no mappable regions. The
+`kaiju diagnostics <file>` command prints these facts separately from the
+stable `info` and `map` summaries.
+
+## Memory Model
+
+The memory model distinguishes virtual address, file offset, region size, and
+permissions. A `MemoryMap` owns ordered `MemoryRegion` values and supports:
+
+- region lookup by virtual address
+- byte and range reads
+- executable and readable region listing
+- virtual-address to file-offset translation when a region is file-backed
+- file-offset to virtual-address translation for initialized mapped bytes
+
+Parser and memory APIs must return explicit errors for unmapped or invalid
+reads.
+
+## Strings Model
+
+Strings extraction scans original file bytes, not only mapped memory. Results
+include file offset, encoding, character length, value, and a virtual address
+when the file offset belongs to an initialized mapped region. The current
+extractor supports printable ASCII and UTF-16LE strings with a configurable
+minimum character length.
+
+## Disassembly Model
+
+Disassembly is exposed through a backend-independent `Disassembler` trait and a
+normalized instruction type. The current x86-64 implementation is intentionally
+small: it handles common prologue/epilogue instructions, direct relative calls
+and branches, simple register-to-register moves and arithmetic, and falls back
+to an unknown byte directive for unrecognized opcodes.
+
+Backend-specific decoder types must not leak through the public API. A later
+phase can replace or augment the minimal decoder with a fuller backend while
+keeping the normalized instruction model stable.
+
+## Analysis Pass Model
+
+The analysis framework is planned as explicit passes over a project:
+
+```rust
+pub trait AnalysisPass {
+    fn name(&self) -> &'static str;
+    fn run(&self, project: &mut Project) -> Result<AnalysisReport>;
+}
+```
+
+The first passes will cover strings, entrypoint disassembly, CFG construction,
+function discovery, and cross-reference discovery.
+
+## CFG Model
+
+The current CFG builder uses recursive descent from an entrypoint or requested
+address. It decodes normalized instructions, ends blocks at unconditional
+jumps, conditional jumps, returns, traps, and unknown instructions, and follows
+direct branch targets when they land in mapped memory.
+
+Conditional branches create taken and not-taken edges. Direct calls create call
+edges, but the builder continues along the fallthrough path instead of entering
+callee bodies. Indirect jumps, jump tables, exceptions, thunk recovery, and
+advanced block splitting are deferred.
+
+## Project State Model
+
+The Phase 8 project model is an in-memory fact store around one loaded binary.
+It owns user-facing and analysis-produced state without changing loader-owned
+bytes or format metadata.
+
+Current project facts include:
+
+- labels and comments keyed by address
+- discovered functions and their basic block starts
+- basic block summaries
+- CFG edges
+- extracted strings
+- normalized symbols copied from loader metadata
+- cross-references
+- small namespaced analysis facts
+
+Analysis crates record into this model through adapters. Strings analysis can
+populate `ProjectString` facts, and CFG analysis can populate function, block,
+edge, and flow/call cross-reference facts. Later phases can add persistence,
+default analysis passes, and richer xref provenance on top of this model.
+
+## IR And Lifting Model
+
+The `kaiju-ir` crate owns the first IR data model and a compact pretty printer.
+It currently contains modules, functions, blocks, instructions, expressions,
+and values. A minimal x86-64 lifter maps normalized disassembly into this IR.
+
+The lifter is intentionally conservative. It handles a small instruction subset
+and emits `unknown` for shapes it cannot represent. This keeps headless lifting
+usable without claiming complete x86 semantics.
+
+## Default Analysis Runner
+
+The analysis crate now defines an `AnalysisPass` trait and a small default
+runner. The default runner records strings, discovers an entrypoint function
+when one exists, attempts an entrypoint CFG, and summarizes cross-references.
+CFG failures from unsupported architectures are reported as warnings so raw or
+unsupported files can still produce a useful analysis summary.
+
+## Plugin And Scripting Boundaries
+
+The `kaiju-plugin-api` crate defines plugin metadata, capability declarations,
+analysis pass plugin traits, loader/architecture/command placeholders, and an
+in-process registry. This is not a dynamic plugin host.
+
+The scripting plan is documented separately. Scripts are not executed yet; the
+planned direction is a restricted, project-API-first scripting surface after the
+project, analysis, IR, plugin, and serialization APIs stabilize.
+
+## Architecture Descriptor Model
+
+The `kaiju-arch` crate provides a small architecture abstraction layer. It
+defines an `Architecture` trait, built-in descriptors, pointer width metadata,
+endian defaults, and a placeholder register model. The current loader and
+disassembler still use `ArchitectureId` directly, but future backend selection
+can move through these descriptors.
+
+## Project Snapshot Export
+
+The project crate can now produce a deterministic `kaiju.project.v1` JSON
+snapshot. The snapshot is derived output for headless automation and tests. It
+includes binary metadata, summary counts, discovered functions, block summaries,
+loader diagnostics, strings, xrefs, and analysis facts.
+
+This is not a full project database. Future `.kaiju` persistence should keep
+user annotations separate from regenerated analysis facts.

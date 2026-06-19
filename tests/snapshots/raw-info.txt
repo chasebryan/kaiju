@@ -1,0 +1,9 @@
+Path: <RAW_FIXTURE>
+Size: 19 bytes
+Format: Raw
+Architecture: Unknown
+Endian: Unknown
+Entrypoint: None
+Regions: 1
+Sections: 0
+Symbols: 0

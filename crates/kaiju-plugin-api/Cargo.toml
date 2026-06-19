@@ -1,0 +1,15 @@
+[package]
+name = "kaiju-plugin-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kaiju-core = { path = "../kaiju-core" }
+kaiju-loader = { path = "../kaiju-loader" }
+kaiju-project = { path = "../kaiju-project" }
+
+[lib]
+path = "src/lib.rs"

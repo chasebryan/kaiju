@@ -1,0 +1,1343 @@
+#![forbid(unsafe_code)]
+
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use kaiju_core::{
+    Address, ArchitectureId, Diagnostic, DiagnosticSeverity, Endian, KaijuError, KaijuErrorKind,
+    MemoryMap, MemoryRegion, Permissions, Result,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryFormat {
+    Elf,
+    Pe,
+    MachO,
+    Raw,
+    Unknown,
+}
+
+impl fmt::Display for BinaryFormat {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Elf => formatter.write_str("ELF"),
+            Self::Pe => formatter.write_str("PE"),
+            Self::MachO => formatter.write_str("Mach-O"),
+            Self::Raw => formatter.write_str("Raw"),
+            Self::Unknown => formatter.write_str("Unknown"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedBinary {
+    pub path: PathBuf,
+    pub file_size: u64,
+    pub bytes: Vec<u8>,
+    pub format: BinaryFormat,
+    pub arch: ArchitectureId,
+    pub endian: Endian,
+    pub entrypoint: Option<Address>,
+    pub memory_map: MemoryMap,
+    pub sections: Vec<Section>,
+    pub symbols: Vec<Symbol>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Section {
+    pub name: String,
+    pub address: Address,
+    pub file_offset: Option<u64>,
+    pub size: u64,
+    pub permissions: Permissions,
+}
+
+#[derive(Debug, Clone)]
+pub struct Symbol {
+    pub name: String,
+    pub address: Option<Address>,
+}
+
+pub trait Loader {
+    fn load(&self, path: PathBuf, bytes: &[u8]) -> Result<LoadedBinary>;
+}
+
+#[derive(Debug, Default)]
+pub struct RawLoader;
+
+impl RawLoader {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Loader for RawLoader {
+    fn load(&self, path: PathBuf, bytes: &[u8]) -> Result<LoadedBinary> {
+        Ok(load_as_single_region(
+            path,
+            bytes,
+            BinaryFormat::Raw,
+            Endian::Unknown,
+            "raw",
+            vec![loader_note(
+                "unknown format loaded as raw bytes at virtual address 0x0",
+            )],
+        ))
+    }
+}
+
+pub fn load_path(path: impl AsRef<Path>) -> Result<LoadedBinary> {
+    let path = path.as_ref();
+    let bytes = fs::read(path)?;
+    load_bytes(path.to_path_buf(), &bytes)
+}
+
+pub fn load_bytes(path: PathBuf, bytes: &[u8]) -> Result<LoadedBinary> {
+    match detect_format(bytes) {
+        BinaryFormat::Unknown | BinaryFormat::Raw => RawLoader::new().load(path, bytes),
+        BinaryFormat::Elf => ElfLoader::new().load(path, bytes),
+        BinaryFormat::Pe => PeLoader::new().load(path, bytes),
+        BinaryFormat::MachO => Ok(load_as_single_region(
+            path,
+            bytes,
+            BinaryFormat::MachO,
+            detected_endian(BinaryFormat::MachO, bytes),
+            "file",
+            vec![loader_warning(
+                "Mach-O parser is not implemented; loaded file as read-only bytes at virtual address 0x0",
+            )],
+        )),
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct PeLoader;
+
+impl PeLoader {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Loader for PeLoader {
+    fn load(&self, path: PathBuf, bytes: &[u8]) -> Result<LoadedBinary> {
+        let header = parse_pe_header(bytes)?;
+        let sections = parse_pe_sections(bytes, &header)?;
+        let mut memory_map = MemoryMap::new();
+        let mut diagnostics = vec![loader_note(
+            "PE loader uses limited metadata parsing; symbols, imports, and relocations are not yet populated",
+        )];
+
+        for section in &sections {
+            if section.size == 0 {
+                continue;
+            }
+
+            let initialized_bytes = match section.file_offset {
+                Some(offset) => {
+                    checked_range(bytes, offset, section.raw_size, "PE section data")?.to_vec()
+                }
+                None => Vec::new(),
+            };
+            let region = MemoryRegion::new_with_size(
+                section.name.clone(),
+                section.address,
+                section.file_offset,
+                section.size,
+                section.permissions,
+                initialized_bytes,
+            )?;
+            memory_map.add_region(region);
+        }
+
+        if memory_map.regions().is_empty() {
+            diagnostics.push(loader_warning(
+                "PE contained no mappable sections; loaded file as read-only bytes at virtual address 0x0",
+            ));
+            memory_map.add_region(MemoryRegion::new(
+                "pe-file",
+                Address::ZERO,
+                Some(0),
+                Permissions::read_only(),
+                bytes.to_vec(),
+            ));
+        }
+
+        Ok(LoadedBinary {
+            path,
+            file_size: bytes.len() as u64,
+            bytes: bytes.to_vec(),
+            format: BinaryFormat::Pe,
+            arch: pe_machine_to_arch(header.machine),
+            endian: Endian::Little,
+            entrypoint: header.entrypoint,
+            memory_map,
+            sections: sections
+                .into_iter()
+                .map(|section| Section {
+                    name: section.name,
+                    address: section.address,
+                    file_offset: section.file_offset,
+                    size: section.size,
+                    permissions: section.permissions,
+                })
+                .collect(),
+            symbols: Vec::new(),
+            diagnostics,
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ElfLoader;
+
+impl ElfLoader {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Loader for ElfLoader {
+    fn load(&self, path: PathBuf, bytes: &[u8]) -> Result<LoadedBinary> {
+        let header = parse_elf_header(bytes)?;
+        let program_headers = parse_elf_program_headers(bytes, &header)?;
+        let sections = parse_elf_sections(bytes, &header)?;
+        let mut memory_map = MemoryMap::new();
+        let mut diagnostics = vec![loader_note(
+            "ELF loader uses limited metadata parsing; symbols, relocations, and imports are not yet populated",
+        )];
+
+        for (index, program_header) in program_headers
+            .iter()
+            .filter(|program_header| program_header.segment_type == PT_LOAD)
+            .enumerate()
+        {
+            if program_header.memory_size == 0 {
+                continue;
+            }
+            if program_header.file_size > program_header.memory_size {
+                return Err(malformed("ELF segment file size exceeds memory size"));
+            }
+
+            let segment_bytes = checked_range(
+                bytes,
+                program_header.offset,
+                program_header.file_size,
+                "ELF segment",
+            )?
+            .to_vec();
+            let region = MemoryRegion::new_with_size(
+                format!("LOAD{index}"),
+                Address::new(program_header.virtual_address),
+                Some(program_header.offset),
+                program_header.memory_size,
+                segment_permissions(program_header.flags),
+                segment_bytes,
+            )?;
+            memory_map.add_region(region);
+        }
+
+        if memory_map.regions().is_empty() {
+            diagnostics.push(loader_warning(
+                "ELF contained no PT_LOAD regions; loaded file as read-only bytes at virtual address 0x0",
+            ));
+            memory_map.add_region(MemoryRegion::new(
+                "elf-file",
+                Address::ZERO,
+                Some(0),
+                Permissions::read_only(),
+                bytes.to_vec(),
+            ));
+        }
+
+        Ok(LoadedBinary {
+            path,
+            file_size: bytes.len() as u64,
+            bytes: bytes.to_vec(),
+            format: BinaryFormat::Elf,
+            arch: elf_machine_to_arch(header.machine),
+            endian: header.endian,
+            entrypoint: Some(Address::new(header.entrypoint)),
+            memory_map,
+            sections,
+            symbols: Vec::new(),
+            diagnostics,
+        })
+    }
+}
+
+#[must_use]
+pub fn detect_format(bytes: &[u8]) -> BinaryFormat {
+    if bytes.starts_with(b"\x7fELF") {
+        return BinaryFormat::Elf;
+    }
+
+    if looks_like_pe(bytes) {
+        return BinaryFormat::Pe;
+    }
+
+    if looks_like_mach_o(bytes) {
+        return BinaryFormat::MachO;
+    }
+
+    BinaryFormat::Unknown
+}
+
+const ELF_IDENT_LEN: usize = 16;
+const ELFCLASS32: u8 = 1;
+const ELFCLASS64: u8 = 2;
+const ELFDATA2LSB: u8 = 1;
+const ELFDATA2MSB: u8 = 2;
+const PT_LOAD: u32 = 1;
+const SHT_NOBITS: u32 = 8;
+const SHF_WRITE: u64 = 0x1;
+const SHF_ALLOC: u64 = 0x2;
+const SHF_EXECINSTR: u64 = 0x4;
+const PF_X: u32 = 0x1;
+const PF_W: u32 = 0x2;
+const PF_R: u32 = 0x4;
+const PE_SIGNATURE: &[u8; 4] = b"PE\0\0";
+const PE_COFF_HEADER_SIZE: u64 = 20;
+const PE_SECTION_HEADER_SIZE: u16 = 40;
+const PE32_MAGIC: u16 = 0x10b;
+const PE32_PLUS_MAGIC: u16 = 0x20b;
+const IMAGE_FILE_MACHINE_I386: u16 = 0x014c;
+const IMAGE_FILE_MACHINE_ARMNT: u16 = 0x01c4;
+const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+const IMAGE_FILE_MACHINE_ARM64: u16 = 0xaa64;
+const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
+const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
+const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ElfClass {
+    Elf32,
+    Elf64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ElfHeader {
+    class: ElfClass,
+    endian: Endian,
+    machine: u16,
+    entrypoint: u64,
+    program_header_offset: u64,
+    section_header_offset: u64,
+    program_header_entry_size: u16,
+    program_header_count: u16,
+    section_header_entry_size: u16,
+    section_header_count: u16,
+    section_name_table_index: u16,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ElfProgramHeader {
+    segment_type: u32,
+    flags: u32,
+    offset: u64,
+    virtual_address: u64,
+    file_size: u64,
+    memory_size: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ElfSectionHeader {
+    name_offset: u32,
+    section_type: u32,
+    flags: u64,
+    address: u64,
+    offset: u64,
+    size: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeKind {
+    Pe32,
+    Pe32Plus,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PeHeader {
+    machine: u16,
+    image_base: u64,
+    entrypoint: Option<Address>,
+    section_table_offset: u64,
+    section_count: u16,
+}
+
+#[derive(Debug, Clone)]
+struct PeSection {
+    name: String,
+    address: Address,
+    file_offset: Option<u64>,
+    size: u64,
+    raw_size: u64,
+    permissions: Permissions,
+}
+
+fn load_as_single_region(
+    path: PathBuf,
+    bytes: &[u8],
+    format: BinaryFormat,
+    endian: Endian,
+    region_name: &str,
+    diagnostics: Vec<Diagnostic>,
+) -> LoadedBinary {
+    let mut memory_map = MemoryMap::new();
+    memory_map.add_region(MemoryRegion::new(
+        region_name,
+        Address::ZERO,
+        Some(0),
+        Permissions::read_only(),
+        bytes.to_vec(),
+    ));
+
+    LoadedBinary {
+        path,
+        file_size: bytes.len() as u64,
+        bytes: bytes.to_vec(),
+        format,
+        arch: ArchitectureId::Unknown,
+        endian,
+        entrypoint: None,
+        memory_map,
+        sections: Vec::new(),
+        symbols: Vec::new(),
+        diagnostics,
+    }
+}
+
+fn loader_note(message: impl Into<String>) -> Diagnostic {
+    Diagnostic::new(DiagnosticSeverity::Note, message)
+}
+
+fn loader_warning(message: impl Into<String>) -> Diagnostic {
+    Diagnostic::new(DiagnosticSeverity::Warning, message)
+}
+
+fn parse_pe_header(bytes: &[u8]) -> Result<PeHeader> {
+    if !bytes.starts_with(b"MZ") {
+        return Err(malformed("input is not a PE/DOS image"));
+    }
+
+    let pe_offset = u64::from(read_u32(bytes, 0x3c, Endian::Little, "PE header offset")?);
+    let signature = checked_range(bytes, pe_offset, 4, "PE signature")?;
+    if signature != PE_SIGNATURE.as_slice() {
+        return Err(malformed("PE signature is missing"));
+    }
+
+    let coff_offset = checked_add_offset(pe_offset, 4, "PE COFF header offset")?;
+    checked_range(bytes, coff_offset, PE_COFF_HEADER_SIZE, "PE COFF header")?;
+    let machine = read_u16(bytes, coff_offset, Endian::Little, "PE machine")?;
+    let section_count = read_u16(bytes, coff_offset + 2, Endian::Little, "PE section count")?;
+    let optional_header_size = read_u16(
+        bytes,
+        coff_offset + 16,
+        Endian::Little,
+        "PE optional header size",
+    )?;
+    let optional_header_offset = checked_add_offset(
+        coff_offset,
+        PE_COFF_HEADER_SIZE,
+        "PE optional header offset",
+    )?;
+    checked_range(
+        bytes,
+        optional_header_offset,
+        u64::from(optional_header_size),
+        "PE optional header",
+    )?;
+
+    let magic = read_u16(
+        bytes,
+        optional_header_offset,
+        Endian::Little,
+        "PE optional header magic",
+    )?;
+    let kind = match magic {
+        PE32_MAGIC => PeKind::Pe32,
+        PE32_PLUS_MAGIC => PeKind::Pe32Plus,
+        value => {
+            return Err(malformed(format!(
+                "unsupported PE optional header magic 0x{value:x}"
+            )))
+        }
+    };
+    if optional_header_size < 32 {
+        return Err(malformed("PE optional header is too small"));
+    }
+
+    let entrypoint_rva = u64::from(read_u32(
+        bytes,
+        optional_header_offset + 16,
+        Endian::Little,
+        "PE entrypoint RVA",
+    )?);
+    let image_base = match kind {
+        PeKind::Pe32 => u64::from(read_u32(
+            bytes,
+            optional_header_offset + 28,
+            Endian::Little,
+            "PE image base",
+        )?),
+        PeKind::Pe32Plus => read_u64(
+            bytes,
+            optional_header_offset + 24,
+            Endian::Little,
+            "PE image base",
+        )?,
+    };
+    let entrypoint = if entrypoint_rva == 0 {
+        None
+    } else {
+        Some(Address::new(
+            image_base
+                .checked_add(entrypoint_rva)
+                .ok_or_else(|| malformed("PE entrypoint address overflow"))?,
+        ))
+    };
+    let section_table_offset = checked_add_offset(
+        optional_header_offset,
+        u64::from(optional_header_size),
+        "PE section table offset",
+    )?;
+
+    Ok(PeHeader {
+        machine,
+        image_base,
+        entrypoint,
+        section_table_offset,
+        section_count,
+    })
+}
+
+fn parse_pe_sections(bytes: &[u8], header: &PeHeader) -> Result<Vec<PeSection>> {
+    let mut sections = Vec::with_capacity(usize::from(header.section_count));
+    for index in 0..header.section_count {
+        let base = table_entry_offset(
+            header.section_table_offset,
+            PE_SECTION_HEADER_SIZE,
+            index,
+            "PE section table",
+        )?;
+        checked_range(
+            bytes,
+            base,
+            u64::from(PE_SECTION_HEADER_SIZE),
+            "PE section header",
+        )?;
+
+        let name_bytes = checked_range(bytes, base, 8, "PE section name")?;
+        let name = pe_section_name(name_bytes, usize::from(index));
+        let virtual_size = u64::from(read_u32(
+            bytes,
+            base + 8,
+            Endian::Little,
+            "PE section virtual size",
+        )?);
+        let virtual_address = u64::from(read_u32(
+            bytes,
+            base + 12,
+            Endian::Little,
+            "PE section virtual address",
+        )?);
+        let raw_size = u64::from(read_u32(
+            bytes,
+            base + 16,
+            Endian::Little,
+            "PE section raw size",
+        )?);
+        let raw_offset = u64::from(read_u32(
+            bytes,
+            base + 20,
+            Endian::Little,
+            "PE section raw offset",
+        )?);
+        let characteristics = read_u32(
+            bytes,
+            base + 36,
+            Endian::Little,
+            "PE section characteristics",
+        )?;
+        let size = virtual_size.max(raw_size);
+        let file_offset = if raw_size == 0 {
+            None
+        } else {
+            checked_range(bytes, raw_offset, raw_size, "PE section data")?;
+            Some(raw_offset)
+        };
+        let address = Address::new(
+            header
+                .image_base
+                .checked_add(virtual_address)
+                .ok_or_else(|| malformed("PE section virtual address overflow"))?,
+        );
+
+        sections.push(PeSection {
+            name,
+            address,
+            file_offset,
+            size,
+            raw_size,
+            permissions: pe_section_permissions(characteristics),
+        });
+    }
+
+    Ok(sections)
+}
+
+fn pe_section_name(bytes: &[u8], index: usize) -> String {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    let name = String::from_utf8_lossy(&bytes[..end]).into_owned();
+    if name.is_empty() {
+        format!("section{index}")
+    } else {
+        name
+    }
+}
+
+fn parse_elf_header(bytes: &[u8]) -> Result<ElfHeader> {
+    if bytes.len() < ELF_IDENT_LEN || !bytes.starts_with(b"\x7fELF") {
+        return Err(malformed("input is not a complete ELF identifier"));
+    }
+
+    let class = match byte_at(bytes, 4, "ELF class")? {
+        ELFCLASS32 => ElfClass::Elf32,
+        ELFCLASS64 => ElfClass::Elf64,
+        value => return Err(malformed(format!("unsupported ELF class {value}"))),
+    };
+    let endian = match byte_at(bytes, 5, "ELF data encoding")? {
+        ELFDATA2LSB => Endian::Little,
+        ELFDATA2MSB => Endian::Big,
+        value => return Err(malformed(format!("unsupported ELF data encoding {value}"))),
+    };
+
+    let min_header_size = match class {
+        ElfClass::Elf32 => 52,
+        ElfClass::Elf64 => 64,
+    };
+    checked_range(bytes, 0, min_header_size, "ELF header")?;
+
+    let machine = read_u16(bytes, 18, endian, "ELF machine")?;
+    let entrypoint = match class {
+        ElfClass::Elf32 => u64::from(read_u32(bytes, 24, endian, "ELF entrypoint")?),
+        ElfClass::Elf64 => read_u64(bytes, 24, endian, "ELF entrypoint")?,
+    };
+    let program_header_offset = match class {
+        ElfClass::Elf32 => u64::from(read_u32(bytes, 28, endian, "ELF program header offset")?),
+        ElfClass::Elf64 => read_u64(bytes, 32, endian, "ELF program header offset")?,
+    };
+    let section_header_offset = match class {
+        ElfClass::Elf32 => u64::from(read_u32(bytes, 32, endian, "ELF section header offset")?),
+        ElfClass::Elf64 => read_u64(bytes, 40, endian, "ELF section header offset")?,
+    };
+    let program_header_entry_size = match class {
+        ElfClass::Elf32 => read_u16(bytes, 42, endian, "ELF program header entry size")?,
+        ElfClass::Elf64 => read_u16(bytes, 54, endian, "ELF program header entry size")?,
+    };
+    let program_header_count = match class {
+        ElfClass::Elf32 => read_u16(bytes, 44, endian, "ELF program header count")?,
+        ElfClass::Elf64 => read_u16(bytes, 56, endian, "ELF program header count")?,
+    };
+    let section_header_entry_size = match class {
+        ElfClass::Elf32 => read_u16(bytes, 46, endian, "ELF section header entry size")?,
+        ElfClass::Elf64 => read_u16(bytes, 58, endian, "ELF section header entry size")?,
+    };
+    let section_header_count = match class {
+        ElfClass::Elf32 => read_u16(bytes, 48, endian, "ELF section header count")?,
+        ElfClass::Elf64 => read_u16(bytes, 60, endian, "ELF section header count")?,
+    };
+    let section_name_table_index = match class {
+        ElfClass::Elf32 => read_u16(bytes, 50, endian, "ELF section name table index")?,
+        ElfClass::Elf64 => read_u16(bytes, 62, endian, "ELF section name table index")?,
+    };
+
+    Ok(ElfHeader {
+        class,
+        endian,
+        machine,
+        entrypoint,
+        program_header_offset,
+        section_header_offset,
+        program_header_entry_size,
+        program_header_count,
+        section_header_entry_size,
+        section_header_count,
+        section_name_table_index,
+    })
+}
+
+fn parse_elf_program_headers(bytes: &[u8], header: &ElfHeader) -> Result<Vec<ElfProgramHeader>> {
+    if header.program_header_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let minimum_entry_size = match header.class {
+        ElfClass::Elf32 => 32,
+        ElfClass::Elf64 => 56,
+    };
+    if header.program_header_entry_size < minimum_entry_size {
+        return Err(malformed("ELF program header entry size is too small"));
+    }
+
+    let mut program_headers = Vec::with_capacity(usize::from(header.program_header_count));
+    for index in 0..header.program_header_count {
+        let base = table_entry_offset(
+            header.program_header_offset,
+            header.program_header_entry_size,
+            index,
+            "ELF program header table",
+        )?;
+        checked_range(
+            bytes,
+            base,
+            u64::from(header.program_header_entry_size),
+            "ELF program header",
+        )?;
+
+        let program_header = match header.class {
+            ElfClass::Elf32 => ElfProgramHeader {
+                segment_type: read_u32(bytes, base, header.endian, "ELF p_type")?,
+                offset: u64::from(read_u32(bytes, base + 4, header.endian, "ELF p_offset")?),
+                virtual_address: u64::from(read_u32(
+                    bytes,
+                    base + 8,
+                    header.endian,
+                    "ELF p_vaddr",
+                )?),
+                file_size: u64::from(read_u32(bytes, base + 16, header.endian, "ELF p_filesz")?),
+                memory_size: u64::from(read_u32(bytes, base + 20, header.endian, "ELF p_memsz")?),
+                flags: read_u32(bytes, base + 24, header.endian, "ELF p_flags")?,
+            },
+            ElfClass::Elf64 => ElfProgramHeader {
+                segment_type: read_u32(bytes, base, header.endian, "ELF p_type")?,
+                flags: read_u32(bytes, base + 4, header.endian, "ELF p_flags")?,
+                offset: read_u64(bytes, base + 8, header.endian, "ELF p_offset")?,
+                virtual_address: read_u64(bytes, base + 16, header.endian, "ELF p_vaddr")?,
+                file_size: read_u64(bytes, base + 32, header.endian, "ELF p_filesz")?,
+                memory_size: read_u64(bytes, base + 40, header.endian, "ELF p_memsz")?,
+            },
+        };
+        program_headers.push(program_header);
+    }
+
+    Ok(program_headers)
+}
+
+fn parse_elf_sections(bytes: &[u8], header: &ElfHeader) -> Result<Vec<Section>> {
+    if header.section_header_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let minimum_entry_size = match header.class {
+        ElfClass::Elf32 => 40,
+        ElfClass::Elf64 => 64,
+    };
+    if header.section_header_entry_size < minimum_entry_size {
+        return Err(malformed("ELF section header entry size is too small"));
+    }
+
+    let mut raw_sections = Vec::with_capacity(usize::from(header.section_header_count));
+    for index in 0..header.section_header_count {
+        let base = table_entry_offset(
+            header.section_header_offset,
+            header.section_header_entry_size,
+            index,
+            "ELF section header table",
+        )?;
+        checked_range(
+            bytes,
+            base,
+            u64::from(header.section_header_entry_size),
+            "ELF section header",
+        )?;
+
+        let section = match header.class {
+            ElfClass::Elf32 => ElfSectionHeader {
+                name_offset: read_u32(bytes, base, header.endian, "ELF sh_name")?,
+                section_type: read_u32(bytes, base + 4, header.endian, "ELF sh_type")?,
+                flags: u64::from(read_u32(bytes, base + 8, header.endian, "ELF sh_flags")?),
+                address: u64::from(read_u32(bytes, base + 12, header.endian, "ELF sh_addr")?),
+                offset: u64::from(read_u32(bytes, base + 16, header.endian, "ELF sh_offset")?),
+                size: u64::from(read_u32(bytes, base + 20, header.endian, "ELF sh_size")?),
+            },
+            ElfClass::Elf64 => ElfSectionHeader {
+                name_offset: read_u32(bytes, base, header.endian, "ELF sh_name")?,
+                section_type: read_u32(bytes, base + 4, header.endian, "ELF sh_type")?,
+                flags: read_u64(bytes, base + 8, header.endian, "ELF sh_flags")?,
+                address: read_u64(bytes, base + 16, header.endian, "ELF sh_addr")?,
+                offset: read_u64(bytes, base + 24, header.endian, "ELF sh_offset")?,
+                size: read_u64(bytes, base + 32, header.endian, "ELF sh_size")?,
+            },
+        };
+        raw_sections.push(section);
+    }
+
+    let name_table = section_name_table(bytes, header, &raw_sections)?;
+    let mut sections = Vec::with_capacity(raw_sections.len());
+    for (index, section) in raw_sections.iter().enumerate() {
+        let name = section_name(name_table, section.name_offset)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| format!("section{index}"));
+        let file_offset = if section.section_type == SHT_NOBITS {
+            None
+        } else {
+            Some(section.offset)
+        };
+
+        sections.push(Section {
+            name,
+            address: Address::new(section.address),
+            file_offset,
+            size: section.size,
+            permissions: section_permissions(section.flags),
+        });
+    }
+
+    Ok(sections)
+}
+
+fn section_name_table<'a>(
+    bytes: &'a [u8],
+    header: &ElfHeader,
+    sections: &[ElfSectionHeader],
+) -> Result<Option<&'a [u8]>> {
+    let index = usize::from(header.section_name_table_index);
+    if index == 0 {
+        return Ok(None);
+    }
+
+    let Some(section) = sections.get(index) else {
+        return Err(malformed("ELF section name table index is out of range"));
+    };
+    if section.section_type == SHT_NOBITS || section.size == 0 {
+        return Ok(None);
+    }
+
+    checked_range(
+        bytes,
+        section.offset,
+        section.size,
+        "ELF section name table",
+    )
+    .map(Some)
+}
+
+fn section_name(name_table: Option<&[u8]>, offset: u32) -> Option<String> {
+    let table = name_table?;
+    let start = usize::try_from(offset).ok()?;
+    let rest = table.get(start..)?;
+    let end = rest
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(rest.len());
+    let bytes = rest.get(..end)?;
+    Some(String::from_utf8_lossy(bytes).into_owned())
+}
+
+fn table_entry_offset(
+    table_offset: u64,
+    entry_size: u16,
+    index: u16,
+    context: &str,
+) -> Result<u64> {
+    let index_offset = u64::from(entry_size)
+        .checked_mul(u64::from(index))
+        .ok_or_else(|| malformed(format!("{context} offset overflow")))?;
+    table_offset
+        .checked_add(index_offset)
+        .ok_or_else(|| malformed(format!("{context} offset overflow")))
+}
+
+fn checked_add_offset(base: u64, addend: u64, context: &str) -> Result<u64> {
+    base.checked_add(addend)
+        .ok_or_else(|| malformed(format!("{context} overflow")))
+}
+
+fn checked_range<'a>(bytes: &'a [u8], offset: u64, size: u64, context: &str) -> Result<&'a [u8]> {
+    let start = usize::try_from(offset)
+        .map_err(|_| malformed(format!("{context} offset does not fit in usize")))?;
+    let len = usize::try_from(size)
+        .map_err(|_| malformed(format!("{context} size does not fit in usize")))?;
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| malformed(format!("{context} range overflow")))?;
+
+    bytes
+        .get(start..end)
+        .ok_or_else(|| malformed(format!("{context} extends beyond file")))
+}
+
+fn byte_at(bytes: &[u8], offset: usize, context: &str) -> Result<u8> {
+    bytes
+        .get(offset)
+        .copied()
+        .ok_or_else(|| malformed(format!("{context} is missing")))
+}
+
+fn read_u16(bytes: &[u8], offset: u64, endian: Endian, context: &str) -> Result<u16> {
+    let bytes = checked_range(bytes, offset, 2, context)?;
+    let array = <[u8; 2]>::try_from(bytes)
+        .map_err(|_| malformed(format!("{context} has invalid width")))?;
+    Ok(match endian {
+        Endian::Little => u16::from_le_bytes(array),
+        Endian::Big => u16::from_be_bytes(array),
+        Endian::Unknown => return Err(malformed(format!("{context} has unknown endian"))),
+    })
+}
+
+fn read_u32(bytes: &[u8], offset: u64, endian: Endian, context: &str) -> Result<u32> {
+    let bytes = checked_range(bytes, offset, 4, context)?;
+    let array = <[u8; 4]>::try_from(bytes)
+        .map_err(|_| malformed(format!("{context} has invalid width")))?;
+    Ok(match endian {
+        Endian::Little => u32::from_le_bytes(array),
+        Endian::Big => u32::from_be_bytes(array),
+        Endian::Unknown => return Err(malformed(format!("{context} has unknown endian"))),
+    })
+}
+
+fn read_u64(bytes: &[u8], offset: u64, endian: Endian, context: &str) -> Result<u64> {
+    let bytes = checked_range(bytes, offset, 8, context)?;
+    let array = <[u8; 8]>::try_from(bytes)
+        .map_err(|_| malformed(format!("{context} has invalid width")))?;
+    Ok(match endian {
+        Endian::Little => u64::from_le_bytes(array),
+        Endian::Big => u64::from_be_bytes(array),
+        Endian::Unknown => return Err(malformed(format!("{context} has unknown endian"))),
+    })
+}
+
+fn elf_machine_to_arch(machine: u16) -> ArchitectureId {
+    match machine {
+        3 => ArchitectureId::X86,
+        40 => ArchitectureId::Arm,
+        62 => ArchitectureId::X86_64,
+        183 => ArchitectureId::Aarch64,
+        _ => ArchitectureId::Unknown,
+    }
+}
+
+fn pe_machine_to_arch(machine: u16) -> ArchitectureId {
+    match machine {
+        IMAGE_FILE_MACHINE_I386 => ArchitectureId::X86,
+        IMAGE_FILE_MACHINE_ARMNT => ArchitectureId::Arm,
+        IMAGE_FILE_MACHINE_AMD64 => ArchitectureId::X86_64,
+        IMAGE_FILE_MACHINE_ARM64 => ArchitectureId::Aarch64,
+        _ => ArchitectureId::Unknown,
+    }
+}
+
+fn segment_permissions(flags: u32) -> Permissions {
+    Permissions::new(flags & PF_R != 0, flags & PF_W != 0, flags & PF_X != 0)
+}
+
+fn section_permissions(flags: u64) -> Permissions {
+    Permissions::new(
+        flags & SHF_ALLOC != 0,
+        flags & SHF_WRITE != 0,
+        flags & SHF_EXECINSTR != 0,
+    )
+}
+
+fn pe_section_permissions(characteristics: u32) -> Permissions {
+    Permissions::new(
+        characteristics & IMAGE_SCN_MEM_READ != 0,
+        characteristics & IMAGE_SCN_MEM_WRITE != 0,
+        characteristics & IMAGE_SCN_MEM_EXECUTE != 0,
+    )
+}
+
+fn malformed(message: impl Into<String>) -> KaijuError {
+    KaijuError::new(KaijuErrorKind::MalformedBinary, message)
+}
+
+fn looks_like_pe(bytes: &[u8]) -> bool {
+    if !bytes.starts_with(b"MZ") {
+        return false;
+    }
+
+    let Some(pointer_bytes) = bytes.get(0x3c..0x40) else {
+        return false;
+    };
+    let Ok(pointer_bytes) = <[u8; 4]>::try_from(pointer_bytes) else {
+        return false;
+    };
+    let pe_offset = u32::from_le_bytes(pointer_bytes) as usize;
+    let Some(pe_end) = pe_offset.checked_add(4) else {
+        return false;
+    };
+
+    bytes.get(pe_offset..pe_end) == Some(b"PE\0\0")
+}
+
+fn looks_like_mach_o(bytes: &[u8]) -> bool {
+    matches!(
+        bytes.get(0..4),
+        Some([0xfe, 0xed, 0xfa, 0xce])
+            | Some([0xce, 0xfa, 0xed, 0xfe])
+            | Some([0xfe, 0xed, 0xfa, 0xcf])
+            | Some([0xcf, 0xfa, 0xed, 0xfe])
+            | Some([0xca, 0xfe, 0xba, 0xbe])
+            | Some([0xbe, 0xba, 0xfe, 0xca])
+    )
+}
+
+fn detected_endian(format: BinaryFormat, bytes: &[u8]) -> Endian {
+    match format {
+        BinaryFormat::Elf => match bytes.get(5) {
+            Some(1) => Endian::Little,
+            Some(2) => Endian::Big,
+            _ => Endian::Unknown,
+        },
+        BinaryFormat::Pe => Endian::Little,
+        BinaryFormat::MachO => match bytes.get(0..4) {
+            Some([0xfe, 0xed, 0xfa, 0xce]) | Some([0xfe, 0xed, 0xfa, 0xcf]) => Endian::Big,
+            Some([0xce, 0xfa, 0xed, 0xfe]) | Some([0xcf, 0xfa, 0xed, 0xfe]) => Endian::Little,
+            _ => Endian::Unknown,
+        },
+        BinaryFormat::Raw | BinaryFormat::Unknown => Endian::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_elf_magic() {
+        assert_eq!(detect_format(b"\x7fELF\x02\x01\x01"), BinaryFormat::Elf);
+    }
+
+    #[test]
+    fn detects_pe_magic() {
+        let mut bytes = vec![0_u8; 0x80];
+        bytes[0] = b'M';
+        bytes[1] = b'Z';
+        bytes[0x3c..0x40].copy_from_slice(&0x40_u32.to_le_bytes());
+        bytes[0x40..0x44].copy_from_slice(b"PE\0\0");
+
+        assert_eq!(detect_format(&bytes), BinaryFormat::Pe);
+    }
+
+    #[test]
+    fn loads_pe32_plus_metadata_sections_and_maps() {
+        let bytes = synthetic_pe32_plus();
+        let binary = load_bytes(PathBuf::from("sample.exe"), &bytes).expect("load PE");
+
+        assert_eq!(binary.format, BinaryFormat::Pe);
+        assert_eq!(binary.arch, ArchitectureId::X86_64);
+        assert_eq!(binary.endian, Endian::Little);
+        assert_eq!(binary.entrypoint, Some(Address::new(0x140001000)));
+        assert_eq!(binary.sections.len(), 2);
+        assert_eq!(binary.sections[0].name, ".text");
+        assert_eq!(binary.sections[0].address, Address::new(0x140001000));
+        assert!(binary.sections[0].permissions.execute);
+        assert_eq!(binary.memory_map.regions().len(), 2);
+
+        let text = &binary.memory_map.regions()[0];
+        assert_eq!(text.name, ".text");
+        assert_eq!(text.address, Address::new(0x140001000));
+        assert_eq!(text.file_offset, Some(0x200));
+        assert_eq!(text.size, 0x200);
+        assert!(text.permissions.read);
+        assert!(text.permissions.execute);
+        assert!(!text.permissions.write);
+        assert_eq!(
+            binary
+                .memory_map
+                .read_range(Address::new(0x140001000), 4)
+                .expect("read text"),
+            vec![0x90, 0x90, 0xc3, 0x00]
+        );
+        assert_eq!(
+            binary
+                .memory_map
+                .translate_virtual_to_file_offset(Address::new(0x140001003)),
+            Some(0x203)
+        );
+    }
+
+    #[test]
+    fn detects_mach_o_magic() {
+        assert_eq!(
+            detect_format(&[0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0]),
+            BinaryFormat::MachO
+        );
+    }
+
+    #[test]
+    fn mach_o_load_uses_detection_only_diagnostic() {
+        let bytes = [0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0];
+        let binary = load_bytes(PathBuf::from("sample.macho"), &bytes).expect("load Mach-O");
+
+        assert_eq!(binary.format, BinaryFormat::MachO);
+        assert_eq!(binary.endian, Endian::Little);
+        assert_eq!(binary.memory_map.regions().len(), 1);
+        assert!(binary.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Warning
+                && diagnostic
+                    .message
+                    .contains("Mach-O parser is not implemented")
+        }));
+    }
+
+    #[test]
+    fn detects_unknown_file() {
+        assert_eq!(detect_format(b"not an executable"), BinaryFormat::Unknown);
+    }
+
+    #[test]
+    fn unknown_file_loads_as_raw() {
+        let binary = load_bytes(PathBuf::from("sample.bin"), b"hello").expect("load");
+
+        assert_eq!(binary.format, BinaryFormat::Raw);
+        assert_eq!(binary.memory_map.regions().len(), 1);
+        assert!(binary.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Note
+                && diagnostic.message.contains("raw bytes")
+        }));
+        assert_eq!(
+            binary
+                .memory_map
+                .read_range(Address::ZERO, 5)
+                .expect("read"),
+            b"hello"
+        );
+    }
+
+    #[test]
+    fn loads_elf64_metadata_sections_and_load_segment() {
+        let bytes = synthetic_elf64_le();
+        let binary = load_bytes(PathBuf::from("sample.elf"), &bytes).expect("load ELF");
+
+        assert_eq!(binary.format, BinaryFormat::Elf);
+        assert_eq!(binary.arch, ArchitectureId::X86_64);
+        assert_eq!(binary.endian, Endian::Little);
+        assert_eq!(binary.entrypoint, Some(Address::new(0x401000)));
+        assert_eq!(binary.sections.len(), 3);
+        assert_eq!(binary.sections[1].name, ".text");
+        assert!(binary.sections[1].permissions.execute);
+        assert_eq!(binary.memory_map.regions().len(), 1);
+
+        let region = &binary.memory_map.regions()[0];
+        assert_eq!(region.name, "LOAD0");
+        assert_eq!(region.address, Address::new(0x401000));
+        assert_eq!(region.size, 8);
+        assert_eq!(region.file_offset, Some(0x200));
+        assert!(region.permissions.read);
+        assert!(region.permissions.execute);
+        assert!(!region.permissions.write);
+        assert_eq!(
+            binary
+                .memory_map
+                .read_range(Address::new(0x401000), 8)
+                .expect("read segment"),
+            vec![0x90, 0x90, 0xc3, 0x00, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            binary
+                .memory_map
+                .translate_virtual_to_file_offset(Address::new(0x401003)),
+            Some(0x203)
+        );
+        assert_eq!(
+            binary
+                .memory_map
+                .translate_virtual_to_file_offset(Address::new(0x401004)),
+            None
+        );
+    }
+
+    #[test]
+    fn truncated_elf_returns_clean_error() {
+        let error = load_bytes(PathBuf::from("bad.elf"), b"\x7fELF")
+            .expect_err("truncated ELF should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn elf_segment_outside_file_returns_clean_error() {
+        let mut bytes = synthetic_elf64_le();
+        write_u64_le(&mut bytes, 0x40 + 32, 0x1000);
+
+        let error =
+            load_bytes(PathBuf::from("bad.elf"), &bytes).expect_err("bad segment should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn pe_section_outside_file_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus();
+        write_u32_le(&mut bytes, 0x188 + 16, 0x4000);
+
+        let error = load_bytes(PathBuf::from("bad.exe"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    fn synthetic_pe32_plus() -> Vec<u8> {
+        let mut bytes = vec![0_u8; 0x800];
+        bytes[0] = b'M';
+        bytes[1] = b'Z';
+        write_u32_le(&mut bytes, 0x3c, 0x100);
+        bytes[0x100..0x104].copy_from_slice(PE_SIGNATURE);
+
+        let coff = 0x104;
+        write_u16_le(&mut bytes, coff, IMAGE_FILE_MACHINE_AMD64);
+        write_u16_le(&mut bytes, coff + 2, 2);
+        write_u16_le(&mut bytes, coff + 16, 0x70);
+
+        let optional = coff + 20;
+        write_u16_le(&mut bytes, optional, PE32_PLUS_MAGIC);
+        write_u32_le(&mut bytes, optional + 16, 0x1000);
+        write_u64_le(&mut bytes, optional + 24, 0x140000000);
+
+        write_pe_section(
+            &mut bytes,
+            0x188,
+            PeSectionSpec {
+                name: b".text\0\0\0",
+                virtual_size: 0x100,
+                virtual_address: 0x1000,
+                raw_size: 0x200,
+                raw_offset: 0x200,
+                characteristics: IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE,
+            },
+        );
+        write_pe_section(
+            &mut bytes,
+            0x1b0,
+            PeSectionSpec {
+                name: b".data\0\0\0",
+                virtual_size: 0x80,
+                virtual_address: 0x2000,
+                raw_size: 0x200,
+                raw_offset: 0x400,
+                characteristics: IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE,
+            },
+        );
+
+        bytes[0x200..0x204].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
+        bytes[0x400..0x404].copy_from_slice(&[1, 2, 3, 4]);
+
+        bytes
+    }
+
+    fn synthetic_elf64_le() -> Vec<u8> {
+        let mut bytes = vec![0_u8; 0x240];
+        bytes[0..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = ELFCLASS64;
+        bytes[5] = ELFDATA2LSB;
+        bytes[6] = 1;
+
+        write_u16_le(&mut bytes, 16, 2);
+        write_u16_le(&mut bytes, 18, 62);
+        write_u32_le(&mut bytes, 20, 1);
+        write_u64_le(&mut bytes, 24, 0x401000);
+        write_u64_le(&mut bytes, 32, 0x40);
+        write_u64_le(&mut bytes, 40, 0x100);
+        write_u16_le(&mut bytes, 52, 64);
+        write_u16_le(&mut bytes, 54, 56);
+        write_u16_le(&mut bytes, 56, 1);
+        write_u16_le(&mut bytes, 58, 64);
+        write_u16_le(&mut bytes, 60, 3);
+        write_u16_le(&mut bytes, 62, 2);
+
+        write_u32_le(&mut bytes, 0x40, PT_LOAD);
+        write_u32_le(&mut bytes, 0x40 + 4, PF_R | PF_X);
+        write_u64_le(&mut bytes, 0x40 + 8, 0x200);
+        write_u64_le(&mut bytes, 0x40 + 16, 0x401000);
+        write_u64_le(&mut bytes, 0x40 + 32, 4);
+        write_u64_le(&mut bytes, 0x40 + 40, 8);
+        write_u64_le(&mut bytes, 0x40 + 48, 0x1000);
+
+        write_section64(
+            &mut bytes,
+            0x100 + 64,
+            Section64Spec {
+                name: 1,
+                section_type: 1,
+                flags: SHF_ALLOC | SHF_EXECINSTR,
+                address: 0x401000,
+                file_offset: 0x200,
+                size: 4,
+            },
+        );
+        write_section64(
+            &mut bytes,
+            0x100 + 128,
+            Section64Spec {
+                name: 7,
+                section_type: 3,
+                flags: 0,
+                address: 0,
+                file_offset: 0x220,
+                size: 17,
+            },
+        );
+
+        bytes[0x200..0x204].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
+        bytes[0x220..0x231].copy_from_slice(b"\0.text\0.shstrtab\0");
+
+        bytes
+    }
+
+    struct Section64Spec {
+        name: u32,
+        section_type: u32,
+        flags: u64,
+        address: u64,
+        file_offset: u64,
+        size: u64,
+    }
+
+    fn write_section64(bytes: &mut [u8], offset: usize, spec: Section64Spec) {
+        write_u32_le(bytes, offset, spec.name);
+        write_u32_le(bytes, offset + 4, spec.section_type);
+        write_u64_le(bytes, offset + 8, spec.flags);
+        write_u64_le(bytes, offset + 16, spec.address);
+        write_u64_le(bytes, offset + 24, spec.file_offset);
+        write_u64_le(bytes, offset + 32, spec.size);
+    }
+
+    struct PeSectionSpec {
+        name: &'static [u8; 8],
+        virtual_size: u32,
+        virtual_address: u32,
+        raw_size: u32,
+        raw_offset: u32,
+        characteristics: u32,
+    }
+
+    fn write_pe_section(bytes: &mut [u8], offset: usize, spec: PeSectionSpec) {
+        bytes[offset..offset + 8].copy_from_slice(spec.name);
+        write_u32_le(bytes, offset + 8, spec.virtual_size);
+        write_u32_le(bytes, offset + 12, spec.virtual_address);
+        write_u32_le(bytes, offset + 16, spec.raw_size);
+        write_u32_le(bytes, offset + 20, spec.raw_offset);
+        write_u32_le(bytes, offset + 36, spec.characteristics);
+    }
+
+    fn write_u16_le(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u32_le(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u64_le(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+}

@@ -1,0 +1,22 @@
+[workspace]
+members = [
+    "crates/kaiju-core",
+    "crates/kaiju-loader",
+    "crates/kaiju-arch",
+    "crates/kaiju-analysis",
+    "crates/kaiju-disasm",
+    "crates/kaiju-ir",
+    "crates/kaiju-project",
+    "crates/kaiju-plugin-api",
+    "crates/kaiju-cli",
+    "examples/basic-load",
+    "examples/basic-disasm",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/chasebryan/kaiju"
+rust-version = "1.76"

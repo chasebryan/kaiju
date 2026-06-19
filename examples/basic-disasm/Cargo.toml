@@ -1,0 +1,17 @@
+[package]
+name = "kaiju-example-basic-disasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+kaiju-core = { path = "../../crates/kaiju-core" }
+kaiju-disasm = { path = "../../crates/kaiju-disasm" }
+kaiju-loader = { path = "../../crates/kaiju-loader" }
+
+[[bin]]
+name = "kaiju-example-basic-disasm"
+path = "src/main.rs"

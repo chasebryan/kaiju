@@ -1,0 +1,52 @@
+{
+  "schema": "kaiju.project.v1",
+  "binary": {
+    "path": "<RAW_FIXTURE>",
+    "file_size": 19,
+    "format": "Raw",
+    "architecture": "Unknown",
+    "endian": "Unknown",
+    "entrypoint": null
+  },
+  "summary": {
+    "regions": 1,
+    "sections": 0,
+    "symbols": 0,
+    "diagnostics": 1,
+    "strings": 1,
+    "functions": 0,
+    "blocks": 0,
+    "xrefs": 0,
+    "analysis_facts": 2
+  },
+  "functions": [],
+  "blocks": [],
+  "diagnostics": [
+    {
+      "severity": "note",
+      "message": "unknown format loaded as raw bytes at virtual address 0x0"
+    }
+  ],
+  "strings": [
+    {
+      "file_offset": 0,
+      "virtual_address": "0x0000000000000000",
+      "encoding": "ASCII",
+      "char_len": 17,
+      "value": "Kaiju raw fixture"
+    }
+  ],
+  "xrefs": [],
+  "analysis_facts": [
+    {
+      "namespace": "strings",
+      "key": "strings",
+      "value": "1"
+    },
+    {
+      "namespace": "xref-summary",
+      "key": "xrefs",
+      "value": "0"
+    }
+  ]
+}

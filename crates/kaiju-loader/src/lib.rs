@@ -170,12 +170,13 @@ impl Loader for MachOLoader {
                 let mut memory_map = MemoryMap::new();
                 let mut sections = Vec::new();
                 let mut diagnostics = vec![loader_note(
-                    "Mach-O loader uses limited load-command parsing; relocations and dynamic loader metadata are not yet populated",
+                    "Mach-O loader uses limited load-command parsing; section relocation entries are parsed without dynamic loader binding metadata",
                 )];
+                let mut relocations = Vec::new();
 
                 for segment in commands.segments {
                     if segment.size == 0 {
-                        sections.extend(segment.sections);
+                        append_mach_o_sections(segment.sections, &mut sections, &mut relocations);
                         continue;
                     }
 
@@ -199,7 +200,7 @@ impl Loader for MachOLoader {
                         initialized_bytes,
                     )?;
                     memory_map.add_region(region);
-                    sections.extend(segment.sections);
+                    append_mach_o_sections(segment.sections, &mut sections, &mut relocations);
                 }
 
                 if memory_map.regions().is_empty() {
@@ -238,7 +239,7 @@ impl Loader for MachOLoader {
                     symbols: commands.symbols,
                     imports: commands.imports,
                     exports: Vec::new(),
-                    relocations: Vec::new(),
+                    relocations,
                     diagnostics,
                 })
             }
@@ -525,6 +526,8 @@ const MACHO32_SECTION_SIZE: u64 = 68;
 const MACHO64_SECTION_SIZE: u64 = 80;
 const MACHO32_SYMBOL_SIZE: u64 = 12;
 const MACHO64_SYMBOL_SIZE: u64 = 16;
+const MACHO_RELOCATION_SIZE: u64 = 8;
+const MACHO_SCATTERED_RELOCATION_FLAG: u32 = 0x8000_0000;
 const LC_SEGMENT: u32 = 0x1;
 const LC_LOAD_DYLIB: u32 = 0xc;
 const LC_SYMTAB: u32 = 0x2;
@@ -683,7 +686,13 @@ struct MachOSegment {
     size: u64,
     file_size: u64,
     permissions: Permissions,
-    sections: Vec<Section>,
+    sections: Vec<MachOSection>,
+}
+
+#[derive(Debug, Clone)]
+struct MachOSection {
+    section: Section,
+    relocations: Vec<Relocation>,
 }
 
 fn load_as_single_region(
@@ -793,6 +802,7 @@ fn parse_mach_o_load_commands(bytes: &[u8], header: &MachOHeader) -> Result<Mach
                     command_offset,
                     command_size,
                     header.endian,
+                    header.arch,
                 )?);
             }
             LC_SEGMENT_64 => {
@@ -801,6 +811,7 @@ fn parse_mach_o_load_commands(bytes: &[u8], header: &MachOHeader) -> Result<Mach
                     command_offset,
                     command_size,
                     header.endian,
+                    header.arch,
                 )?);
             }
             LC_MAIN if header.is_64 => {
@@ -979,6 +990,7 @@ fn parse_mach_o_segment32(
     command_offset: u64,
     command_size: u64,
     endian: Endian,
+    arch: ArchitectureId,
 ) -> Result<MachOSegment> {
     if command_size < MACHO32_SEGMENT_COMMAND_SIZE {
         return Err(malformed("Mach-O LC_SEGMENT command is too small"));
@@ -1027,6 +1039,7 @@ fn parse_mach_o_segment32(
         command_offset + MACHO32_SEGMENT_COMMAND_SIZE,
         section_count,
         endian,
+        arch,
         permissions,
     )?;
 
@@ -1046,6 +1059,7 @@ fn parse_mach_o_segment64(
     command_offset: u64,
     command_size: u64,
     endian: Endian,
+    arch: ArchitectureId,
 ) -> Result<MachOSegment> {
     if command_size < MACHO64_SEGMENT_COMMAND_SIZE {
         return Err(malformed("Mach-O LC_SEGMENT_64 command is too small"));
@@ -1076,6 +1090,7 @@ fn parse_mach_o_segment64(
         command_offset + MACHO64_SEGMENT_COMMAND_SIZE,
         section_count,
         endian,
+        arch,
         permissions,
     )?;
 
@@ -1095,8 +1110,9 @@ fn parse_mach_o_sections32(
     table_offset: u64,
     section_count: u32,
     endian: Endian,
+    arch: ArchitectureId,
     permissions: Permissions,
-) -> Result<Vec<Section>> {
+) -> Result<Vec<MachOSection>> {
     let mut sections = Vec::with_capacity(
         usize::try_from(section_count)
             .map_err(|_| malformed("Mach-O section count does not fit in usize"))?,
@@ -1113,14 +1129,30 @@ fn parse_mach_o_sections32(
         let address = u64::from(read_u32(bytes, base + 32, endian, "Mach-O section addr")?);
         let size = u64::from(read_u32(bytes, base + 36, endian, "Mach-O section size")?);
         let offset = u64::from(read_u32(bytes, base + 40, endian, "Mach-O section offset")?);
+        let relocation_offset =
+            u64::from(read_u32(bytes, base + 48, endian, "Mach-O section reloff")?);
+        let relocation_count = read_u32(bytes, base + 52, endian, "Mach-O section nreloc")?;
         let flags = read_u32(bytes, base + 56, endian, "Mach-O section flags")?;
         let file_offset = section_file_offset(bytes, offset, size, flags)?;
-        sections.push(Section {
-            name: fallback_name(name, "section"),
-            address: Address::new(address),
-            file_offset,
+        let address = Address::new(address);
+        let relocations = parse_mach_o_section_relocations(
+            bytes,
+            address,
             size,
-            permissions,
+            relocation_offset,
+            relocation_count,
+            endian,
+            arch,
+        )?;
+        sections.push(MachOSection {
+            section: Section {
+                name: fallback_name(name, "section"),
+                address,
+                file_offset,
+                size,
+                permissions,
+            },
+            relocations,
         });
     }
     Ok(sections)
@@ -1131,8 +1163,9 @@ fn parse_mach_o_sections64(
     table_offset: u64,
     section_count: u32,
     endian: Endian,
+    arch: ArchitectureId,
     permissions: Permissions,
-) -> Result<Vec<Section>> {
+) -> Result<Vec<MachOSection>> {
     let mut sections = Vec::with_capacity(
         usize::try_from(section_count)
             .map_err(|_| malformed("Mach-O section count does not fit in usize"))?,
@@ -1149,17 +1182,239 @@ fn parse_mach_o_sections64(
         let address = read_u64(bytes, base + 32, endian, "Mach-O section addr")?;
         let size = read_u64(bytes, base + 40, endian, "Mach-O section size")?;
         let offset = u64::from(read_u32(bytes, base + 48, endian, "Mach-O section offset")?);
+        let relocation_offset =
+            u64::from(read_u32(bytes, base + 56, endian, "Mach-O section reloff")?);
+        let relocation_count = read_u32(bytes, base + 60, endian, "Mach-O section nreloc")?;
         let flags = read_u32(bytes, base + 64, endian, "Mach-O section flags")?;
         let file_offset = section_file_offset(bytes, offset, size, flags)?;
-        sections.push(Section {
-            name: fallback_name(name, "section"),
-            address: Address::new(address),
-            file_offset,
+        let address = Address::new(address);
+        let relocations = parse_mach_o_section_relocations(
+            bytes,
+            address,
             size,
-            permissions,
+            relocation_offset,
+            relocation_count,
+            endian,
+            arch,
+        )?;
+        sections.push(MachOSection {
+            section: Section {
+                name: fallback_name(name, "section"),
+                address,
+                file_offset,
+                size,
+                permissions,
+            },
+            relocations,
         });
     }
     Ok(sections)
+}
+
+fn parse_mach_o_section_relocations(
+    bytes: &[u8],
+    section_address: Address,
+    section_size: u64,
+    relocation_offset: u64,
+    relocation_count: u32,
+    endian: Endian,
+    arch: ArchitectureId,
+) -> Result<Vec<Relocation>> {
+    if relocation_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let table_size = u64::from(relocation_count)
+        .checked_mul(MACHO_RELOCATION_SIZE)
+        .ok_or_else(|| malformed("Mach-O relocation table size overflow"))?;
+    checked_range(
+        bytes,
+        relocation_offset,
+        table_size,
+        "Mach-O relocation table",
+    )?;
+
+    let mut relocations = Vec::with_capacity(
+        usize::try_from(relocation_count)
+            .map_err(|_| malformed("Mach-O relocation count does not fit in usize"))?,
+    );
+    for index in 0..relocation_count {
+        let base = table_entry_offset_u32(
+            relocation_offset,
+            MACHO_RELOCATION_SIZE,
+            index,
+            "Mach-O relocation table",
+        )?;
+        let address_word = read_u32(bytes, base, endian, "Mach-O relocation address")?;
+        let info = read_u32(bytes, base + 4, endian, "Mach-O relocation info")?;
+
+        let relocation = if address_word & MACHO_SCATTERED_RELOCATION_FLAG != 0 {
+            mach_o_scattered_relocation(section_address, section_size, address_word, info, arch)?
+        } else {
+            mach_o_relocation(section_address, section_size, address_word, info, arch)?
+        };
+        relocations.push(relocation);
+    }
+
+    Ok(relocations)
+}
+
+fn mach_o_relocation(
+    section_address: Address,
+    section_size: u64,
+    address_word: u32,
+    info: u32,
+    arch: ArchitectureId,
+) -> Result<Relocation> {
+    let relative_address = u64::from(address_word);
+    if relative_address >= section_size {
+        return Err(malformed("Mach-O relocation address is outside section"));
+    }
+    let address = section_address
+        .checked_add(relative_address)
+        .ok_or_else(|| malformed("Mach-O relocation address overflow"))?;
+    let relocation_type = (info >> 28) & 0xf;
+    let is_external = info & (1 << 27) != 0;
+    let length = (info >> 25) & 0x3;
+    let pcrel = info & (1 << 24) != 0;
+
+    Ok(Relocation {
+        address,
+        kind: mach_o_relocation_kind(arch, relocation_type, pcrel, is_external, length),
+    })
+}
+
+fn mach_o_scattered_relocation(
+    section_address: Address,
+    section_size: u64,
+    address_word: u32,
+    _value: u32,
+    arch: ArchitectureId,
+) -> Result<Relocation> {
+    let relative_address = u64::from(address_word & 0x00ff_ffff);
+    if relative_address >= section_size {
+        return Err(malformed(
+            "Mach-O scattered relocation address is outside section",
+        ));
+    }
+    let address = section_address
+        .checked_add(relative_address)
+        .ok_or_else(|| malformed("Mach-O scattered relocation address overflow"))?;
+    let relocation_type = (address_word >> 24) & 0xf;
+    let length = (address_word >> 28) & 0x3;
+    let pcrel = address_word & (1 << 30) != 0;
+
+    Ok(Relocation {
+        address,
+        kind: mach_o_scattered_relocation_kind(arch, relocation_type, pcrel, length),
+    })
+}
+
+fn mach_o_relocation_kind(
+    arch: ArchitectureId,
+    relocation_type: u32,
+    pcrel: bool,
+    is_external: bool,
+    length: u32,
+) -> String {
+    let binding = if is_external { "external" } else { "local" };
+    format!(
+        "{}-{}-{}-len{}",
+        mach_o_relocation_base_kind(arch, relocation_type),
+        mach_o_pcrel_name(pcrel),
+        binding,
+        mach_o_relocation_width(length)
+    )
+}
+
+fn mach_o_scattered_relocation_kind(
+    arch: ArchitectureId,
+    relocation_type: u32,
+    pcrel: bool,
+    length: u32,
+) -> String {
+    format!(
+        "{}-{}-scattered-len{}",
+        mach_o_relocation_base_kind(arch, relocation_type),
+        mach_o_pcrel_name(pcrel),
+        mach_o_relocation_width(length)
+    )
+}
+
+fn mach_o_pcrel_name(pcrel: bool) -> &'static str {
+    if pcrel {
+        "pcrel"
+    } else {
+        "absolute"
+    }
+}
+
+fn mach_o_relocation_width(length: u32) -> u32 {
+    1_u32 << length.min(3)
+}
+
+fn mach_o_relocation_base_kind(arch: ArchitectureId, relocation_type: u32) -> String {
+    match arch {
+        ArchitectureId::X86_64 => match relocation_type {
+            0 => "macho-x86_64-unsigned".to_string(),
+            1 => "macho-x86_64-signed".to_string(),
+            2 => "macho-x86_64-branch".to_string(),
+            3 => "macho-x86_64-got-load".to_string(),
+            4 => "macho-x86_64-got".to_string(),
+            5 => "macho-x86_64-subtractor".to_string(),
+            6 => "macho-x86_64-signed-1".to_string(),
+            7 => "macho-x86_64-signed-2".to_string(),
+            8 => "macho-x86_64-signed-4".to_string(),
+            9 => "macho-x86_64-tlv".to_string(),
+            value => format!("macho-x86_64-unknown-{value}"),
+        },
+        ArchitectureId::X86 => match relocation_type {
+            0 => "macho-x86-vanilla".to_string(),
+            1 => "macho-x86-pair".to_string(),
+            2 => "macho-x86-sectdiff".to_string(),
+            3 => "macho-x86-pb-la-ptr".to_string(),
+            4 => "macho-x86-local-sectdiff".to_string(),
+            5 => "macho-x86-tlv".to_string(),
+            value => format!("macho-x86-unknown-{value}"),
+        },
+        ArchitectureId::Arm => match relocation_type {
+            0 => "macho-arm-vanilla".to_string(),
+            1 => "macho-arm-pair".to_string(),
+            2 => "macho-arm-sectdiff".to_string(),
+            3 => "macho-arm-local-sectdiff".to_string(),
+            4 => "macho-arm-pb-la-ptr".to_string(),
+            5 => "macho-arm-br24".to_string(),
+            6 => "macho-arm-thumb-br22".to_string(),
+            7 => "macho-arm-thumb-32bit-branch".to_string(),
+            value => format!("macho-arm-unknown-{value}"),
+        },
+        ArchitectureId::Aarch64 => match relocation_type {
+            0 => "macho-arm64-unsigned".to_string(),
+            1 => "macho-arm64-subtractor".to_string(),
+            2 => "macho-arm64-branch26".to_string(),
+            3 => "macho-arm64-page21".to_string(),
+            4 => "macho-arm64-pageoff12".to_string(),
+            5 => "macho-arm64-got-load-page21".to_string(),
+            6 => "macho-arm64-got-load-pageoff12".to_string(),
+            7 => "macho-arm64-pointer-to-got".to_string(),
+            8 => "macho-arm64-tlvp-load-page21".to_string(),
+            9 => "macho-arm64-tlvp-load-pageoff12".to_string(),
+            10 => "macho-arm64-addend".to_string(),
+            value => format!("macho-arm64-unknown-{value}"),
+        },
+        ArchitectureId::Unknown => format!("macho-relocation-{relocation_type}"),
+    }
+}
+
+fn append_mach_o_sections(
+    parsed_sections: Vec<MachOSection>,
+    sections: &mut Vec<Section>,
+    relocations: &mut Vec<Relocation>,
+) {
+    for parsed_section in parsed_sections {
+        sections.push(parsed_section.section);
+        relocations.extend(parsed_section.relocations);
+    }
 }
 
 fn parse_pe_header(bytes: &[u8]) -> Result<PeHeader> {
@@ -3442,6 +3697,25 @@ mod tests {
     }
 
     #[test]
+    fn loads_mach_o64_section_relocations() {
+        let bytes = synthetic_mach_o64_le_with_relocations();
+        let binary = load_bytes(PathBuf::from("sample.macho"), &bytes).expect("load Mach-O");
+
+        assert_eq!(binary.format, BinaryFormat::MachO);
+        assert_eq!(binary.relocations.len(), 2);
+        assert_eq!(binary.relocations[0].address, Address::new(0x100000108));
+        assert_eq!(
+            binary.relocations[0].kind,
+            "macho-x86_64-branch-pcrel-external-len4"
+        );
+        assert_eq!(binary.relocations[1].address, Address::new(0x100000110));
+        assert_eq!(
+            binary.relocations[1].kind,
+            "macho-x86_64-unsigned-absolute-local-len8"
+        );
+    }
+
+    #[test]
     fn mach_o_fat_load_uses_detection_only_diagnostic() {
         let bytes = [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 0];
         let binary = load_bytes(PathBuf::from("fat.macho"), &bytes).expect("load Mach-O");
@@ -3645,6 +3919,29 @@ mod tests {
     fn mach_o_segment_outside_file_returns_clean_error() {
         let mut bytes = synthetic_mach_o64_le();
         write_u64_le(&mut bytes, MACHO64_HEADER_SIZE as usize + 48, 0x400);
+
+        let error =
+            load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn mach_o_relocation_table_outside_file_returns_clean_error() {
+        let mut bytes = synthetic_mach_o64_le_with_relocations();
+        let section = mach_o64_text_section_offset();
+        write_u32_le(&mut bytes, section + 56, 0x1000);
+
+        let error =
+            load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn mach_o_relocation_address_outside_section_returns_clean_error() {
+        let mut bytes = synthetic_mach_o64_le_with_relocations();
+        write_u32_le(&mut bytes, 0x240, 0x80);
 
         let error =
             load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
@@ -4268,6 +4565,48 @@ mod tests {
         bytes
     }
 
+    fn synthetic_mach_o64_le_with_relocations() -> Vec<u8> {
+        let mut bytes = synthetic_mach_o64_le();
+        bytes.resize(0x280, 0);
+
+        let section = mach_o64_text_section_offset();
+        write_u64_le(&mut bytes, section + 40, 0x20);
+        write_u32_le(&mut bytes, section + 56, 0x240);
+        write_u32_le(&mut bytes, section + 60, 2);
+        bytes[0x104..0x120].copy_from_slice(&[0xcc; 0x1c]);
+
+        write_mach_o_relocation(
+            &mut bytes,
+            0x240,
+            MachORelocationSpec {
+                address: 0x8,
+                symbol_index: 1,
+                relocation_type: 2,
+                length: 2,
+                pcrel: true,
+                is_external: true,
+            },
+        );
+        write_mach_o_relocation(
+            &mut bytes,
+            0x248,
+            MachORelocationSpec {
+                address: 0x10,
+                symbol_index: 0,
+                relocation_type: 0,
+                length: 3,
+                pcrel: false,
+                is_external: false,
+            },
+        );
+
+        bytes
+    }
+
+    fn mach_o64_text_section_offset() -> usize {
+        MACHO64_HEADER_SIZE as usize + MACHO64_SEGMENT_COMMAND_SIZE as usize
+    }
+
     fn mach_o64_symtab_command_offset() -> usize {
         MACHO64_HEADER_SIZE as usize
             + (MACHO64_SEGMENT_COMMAND_SIZE + MACHO64_SECTION_SIZE) as usize
@@ -4294,6 +4633,25 @@ mod tests {
         bytes[offset + 5] = section_index;
         write_u16_le(bytes, offset + 6, desc);
         write_u64_le(bytes, offset + 8, value);
+    }
+
+    struct MachORelocationSpec {
+        address: u32,
+        symbol_index: u32,
+        relocation_type: u32,
+        length: u32,
+        pcrel: bool,
+        is_external: bool,
+    }
+
+    fn write_mach_o_relocation(bytes: &mut [u8], offset: usize, spec: MachORelocationSpec) {
+        let info = spec.symbol_index
+            | (u32::from(spec.pcrel) << 24)
+            | (spec.length << 25)
+            | (u32::from(spec.is_external) << 27)
+            | (spec.relocation_type << 28);
+        write_u32_le(bytes, offset, spec.address);
+        write_u32_le(bytes, offset + 4, info);
     }
 
     fn synthetic_elf64_le() -> Vec<u8> {

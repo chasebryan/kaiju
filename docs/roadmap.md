@@ -191,3 +191,10 @@ The package-inspection slice added `kaiju package <project-dir>`, a read-only
 validator for the initial package layout. It checks the required files, schema
 markers, manifest file names, and bounded file sizes, then prints source and
 project summary counts without rewriting the package.
+
+The Mach-O relocation slice added bounded section relocation parsing for thin
+Mach-O inputs. It records normalized relocation addresses and kind strings from
+section `reloff` / `nreloc` tables, rejects relocation tables outside the file
+and relocation addresses outside their owning section, and exposes those rows
+through the existing `relocations`, project JSON, and package surfaces without
+claiming dynamic-loader binding metadata or universal/fat member selection.

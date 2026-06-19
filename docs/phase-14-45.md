@@ -61,6 +61,7 @@ scripting runtime, or decompiler work:
 - bounded derived IR summaries for discovered CFG blocks.
 - initial `.kaiju` project package snapshots with separated annotations.
 - read-only `.kaiju` package inspection and schema validation.
+- bounded Mach-O section relocation parsing.
 - documented future boundaries for GUI, plugins, scripting, fuzzing, snapshots,
   and release readiness.
 

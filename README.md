@@ -36,6 +36,7 @@ what works:
 - Mach-O symbol tables
 - Mach-O dylib dependencies
 - Mach-O undefined-symbol imports
+- Mach-O section relocation tables
 - strings
 - network evidence topology
 - classic PCAP topology and payload inspection

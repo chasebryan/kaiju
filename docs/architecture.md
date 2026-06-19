@@ -45,10 +45,10 @@ tables, import-DLL dependencies, import tables, export tables, and base
 relocation tables. Mach-O has a limited thin parser for CPU/endian metadata,
 `LC_SEGMENT` / `LC_SEGMENT_64` memory maps, section metadata, `LC_MAIN`
 entrypoint translation, `LC_SYMTAB` symbols, `LC_LOAD_DYLIB` dependencies, and
-undefined external imports. Universal/fat Mach-O handling remains
+undefined external imports, plus section relocation entries. Universal/fat Mach-O handling remains
 detection-only. Full parsing of ELF dependency version metadata, PE debug/PDB
-metadata, Mach-O relocations and richer dynamic-loader metadata, and
-format-specific edge cases is deferred.
+metadata, richer Mach-O dynamic-loader metadata, and format-specific edge cases
+is deferred.
 
 Loader diagnostics are attached to the normalized `LoadedBinary` model. They
 report conservative behavior such as raw fallback loading, limited Mach-O

@@ -230,6 +230,27 @@ fn cli_relocations_reports_elf_relocations() {
 }
 
 #[test]
+fn cli_relocations_reports_mach_o_section_relocations() {
+    let path = write_temp_mach_o_relocation_fixture();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("relocations")
+        .arg(&path)
+        .output()
+        .expect("run kaiju relocations on Mach-O");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Address  Kind"));
+    assert!(stdout.contains("0x0000000100000108"));
+    assert!(stdout.contains("macho-x86_64-branch-pcrel-external-len4"));
+    assert!(stdout.contains("0x0000000100000110"));
+    assert!(stdout.contains("macho-x86_64-unsigned-absolute-local-len8"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn cli_exports_reports_pe_exports() {
     let path = write_temp_pe_export_fixture();
 
@@ -1349,6 +1370,20 @@ fn write_temp_mach_o_dylib_fixture() -> PathBuf {
     path
 }
 
+fn write_temp_mach_o_relocation_fixture() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "kaiju-cli-macho-relocations-{}-{unique}.bin",
+        process::id()
+    ));
+    fs::write(&path, synthetic_mach_o64_le_with_relocations())
+        .expect("write Mach-O relocation fixture");
+    path
+}
+
 fn write_temp_strings_fixture() -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2029,6 +2064,47 @@ fn synthetic_mach_o64_le_with_dylib() -> Vec<u8> {
     bytes
 }
 
+fn synthetic_mach_o64_le_with_relocations() -> Vec<u8> {
+    const MACHO64_HEADER_SIZE: usize = 32;
+    const MACHO64_SEGMENT_COMMAND_SIZE: usize = 72;
+
+    let mut bytes = synthetic_mach_o64_le();
+    bytes.resize(0x280, 0);
+
+    let section = MACHO64_HEADER_SIZE + MACHO64_SEGMENT_COMMAND_SIZE;
+    write_u64_le(&mut bytes, section + 40, 0x20);
+    write_u32_le(&mut bytes, section + 56, 0x240);
+    write_u32_le(&mut bytes, section + 60, 2);
+    bytes[0x104..0x120].copy_from_slice(&[0xcc; 0x1c]);
+
+    write_mach_o_relocation(
+        &mut bytes,
+        0x240,
+        MachORelocationSpec {
+            address: 0x8,
+            symbol_index: 1,
+            relocation_type: 2,
+            length: 2,
+            pcrel: true,
+            is_external: true,
+        },
+    );
+    write_mach_o_relocation(
+        &mut bytes,
+        0x248,
+        MachORelocationSpec {
+            address: 0x10,
+            symbol_index: 0,
+            relocation_type: 0,
+            length: 3,
+            pcrel: false,
+            is_external: false,
+        },
+    );
+
+    bytes
+}
+
 fn mach_o64_symtab_command_offset() -> usize {
     const MACHO64_HEADER_SIZE: usize = 32;
     const MACHO64_SEGMENT_COMMAND_SIZE: usize = 72;
@@ -2059,6 +2135,25 @@ fn write_mach_o64_symbol(
     bytes[offset + 5] = section_index;
     write_u16_le(bytes, offset + 6, desc);
     write_u64_le(bytes, offset + 8, value);
+}
+
+struct MachORelocationSpec {
+    address: u32,
+    symbol_index: u32,
+    relocation_type: u32,
+    length: u32,
+    pcrel: bool,
+    is_external: bool,
+}
+
+fn write_mach_o_relocation(bytes: &mut [u8], offset: usize, spec: MachORelocationSpec) {
+    let info = spec.symbol_index
+        | (u32::from(spec.pcrel) << 24)
+        | (spec.length << 25)
+        | (u32::from(spec.is_external) << 27)
+        | (spec.relocation_type << 28);
+    write_u32_le(bytes, offset, spec.address);
+    write_u32_le(bytes, offset + 4, info);
 }
 
 fn strings_fixture_bytes() -> Vec<u8> {

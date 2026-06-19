@@ -68,6 +68,8 @@ because raw input has no entrypoint and no known architecture.
 - Parser changes include malformed-input tests.
 - Loader parser changes are covered by
   `cargo test -p kaiju-loader --test hardening`.
+- Mach-O relocation changes include bounded table and section-relative address
+  tests.
 - New analysis paths return explicit errors or warnings.
 - Project package writes refuse non-empty output directories.
 - Project package inspection is read-only and validates package schema markers.

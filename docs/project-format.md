@@ -1,7 +1,8 @@
 # Project Format
 
-Kaiju does not yet write a full `.kaiju` project database. The current format
-work is a deterministic JSON snapshot for headless automation and tests.
+Kaiju can write a conservative `.kaiju` project package. The current package is
+still a deterministic snapshot for headless automation and tests, not a full
+editable project database.
 
 ## Snapshot Command
 
@@ -42,6 +43,32 @@ under `summary.diagnostics`. Diagnostic rows include a normalized severity and
 message so headless automation can distinguish normal raw fallback notes from
 warnings about conservative or incomplete loader behavior.
 
+## Project Package Command
+
+```bash
+kaiju save <file> --out <project-dir>
+```
+
+The command loads a binary, runs the default analysis passes, and writes an
+initial `kaiju.package.v1` directory. It refuses to write into a non-empty
+directory so existing project data is not silently overwritten.
+
+Current package layout:
+
+```text
+sample.kaiju/
+  manifest.json
+  project.json
+  annotations.json
+```
+
+- `manifest.json` records the package schema, the embedded project snapshot
+  schema, source binary metadata, and package file names.
+- `project.json` is the same deterministic `kaiju.project.v1` output printed by
+  `kaiju export`.
+- `annotations.json` is an empty `kaiju.annotations.v1` file reserved for
+  user-owned labels and comments.
+
 ## Network Snapshots
 
 ```bash
@@ -66,14 +93,16 @@ time, sent byte count, bounded received-payload summary, and any nonfatal error.
 
 ## Future `.kaiju` Package
 
-A later package layout may look like:
+A later package layout may split regenerated analysis data into additional
+files:
 
 ```text
 sample.kaiju/
+  manifest.json
   project.json
   binary.meta.json
   analysis.json
-  comments.json
+  annotations.json
   symbols.json
   cache/
 ```

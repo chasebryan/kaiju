@@ -39,6 +39,8 @@ binaries. The default stance is defensive parsing.
   per-target timeouts, enforce target and byte limits, and have parser,
   validation, and report serialization tests that do not require live targets.
 - Payload inspection stores bounded previews, not unbounded payload archives.
+- Project package writes create a new package directory or reuse an empty one
+  and refuse non-empty output directories by default.
 - Bounded ELF relocation table, linked symbol-table, entry-size, and
   symbol-index parsing tests.
 - Bounded PE import descriptor, thunk, DLL-name, and import-name parsing tests.
@@ -61,6 +63,8 @@ binaries. The default stance is defensive parsing.
 - Keep active network operations explicit, target-scoped, bounded by timeout
   and byte limits, and free of credential capture, exploitation, evasion, or
   persistence behavior.
+- Keep project package writes explicit, path-scoped, and non-overwriting by
+  default.
 
 ## Future Controls
 

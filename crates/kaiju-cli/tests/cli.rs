@@ -633,6 +633,67 @@ fn cli_export_reports_project_json() {
 }
 
 #[test]
+fn cli_save_writes_project_package() {
+    let path = write_temp_elf_fixture();
+    let output_dir = temp_package_dir("save");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("save")
+        .arg(&path)
+        .arg("--out")
+        .arg(&output_dir)
+        .output()
+        .expect("run kaiju save");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Saved:"));
+    assert!(stdout.contains("manifest.json"));
+    assert!(stdout.contains("project.json"));
+    assert!(stdout.contains("annotations.json"));
+
+    let manifest = fs::read_to_string(output_dir.join("manifest.json")).expect("read manifest");
+    let project = fs::read_to_string(output_dir.join("project.json")).expect("read project");
+    let annotations =
+        fs::read_to_string(output_dir.join("annotations.json")).expect("read annotations");
+
+    assert!(manifest.contains("\"schema\": \"kaiju.package.v1\""));
+    assert!(manifest.contains("\"project_schema\": \"kaiju.project.v1\""));
+    assert!(manifest.contains("\"project\": \"project.json\""));
+    assert!(manifest.contains("\"annotations\": \"annotations.json\""));
+    assert!(project.contains("\"schema\": \"kaiju.project.v1\""));
+    assert!(project.contains("\"ir_functions\":"));
+    assert!(annotations.contains("\"schema\": \"kaiju.annotations.v1\""));
+    assert!(annotations.contains("\"labels\": []"));
+    assert!(annotations.contains("\"comments\": []"));
+
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
+fn cli_save_refuses_non_empty_project_package_dir() {
+    let output_dir = temp_package_dir("save-non-empty");
+    fs::create_dir_all(&output_dir).expect("create package dir");
+    fs::write(output_dir.join("existing.txt"), "keep me").expect("write existing file");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("save")
+        .arg(fixture_path("raw.bin"))
+        .arg("--out")
+        .arg(&output_dir)
+        .output()
+        .expect("run kaiju save");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf-8");
+    assert!(stderr.contains("project package output directory is not empty"));
+    assert!(output_dir.join("existing.txt").exists());
+
+    let _ = fs::remove_dir_all(output_dir);
+}
+
+#[test]
 fn cli_functions_reports_discovered_entrypoint_function() {
     let path = write_temp_cfg_elf_fixture();
 
@@ -1241,6 +1302,17 @@ fn write_temp_pcap_fixture() -> PathBuf {
     let path = std::env::temp_dir().join(format!("kaiju-cli-pcap-{}-{unique}.pcap", process::id()));
     fs::write(&path, synthetic_pcap_tcp_http()).expect("write pcap fixture");
     path
+}
+
+fn temp_package_dir(label: &str) -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "kaiju-cli-{label}-{}-{unique}.kaiju",
+        process::id()
+    ))
 }
 
 fn synthetic_elf64_le() -> Vec<u8> {

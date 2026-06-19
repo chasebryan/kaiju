@@ -26,6 +26,8 @@ cargo run -p kaiju-cli -- diagnostics tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- strings tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- analyze tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- export tests/fixtures/raw.bin
+KAIJU_SAVE_DIR=$(mktemp -d /tmp/kaiju-raw.XXXXXX.kaiju)
+cargo run -p kaiju-cli -- save tests/fixtures/raw.bin --out "$KAIJU_SAVE_DIR"
 cargo run -p kaiju-cli -- functions tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- ir tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- xrefs tests/fixtures/raw.bin
@@ -66,6 +68,7 @@ because raw input has no entrypoint and no known architecture.
 - Loader parser changes are covered by
   `cargo test -p kaiju-loader --test hardening`.
 - New analysis paths return explicit errors or warnings.
+- Project package writes refuse non-empty output directories.
 - No `unsafe` is introduced without a narrow documented reason.
 - No new feature enables malware deployment, evasion, credential theft,
   persistence, or unauthorized live target interaction.

@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
 use std::env;
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use kaiju_analysis::{
@@ -118,6 +120,13 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), CliError> {
             let path = read_single_path_arg(&mut args, "export")?;
             let (project, _reports) = analyze_project(path)?;
             println!("{}", project.to_json_pretty());
+            Ok(())
+        }
+        "save" => {
+            let args = read_save_args(&mut args)?;
+            let (project, _reports) = analyze_project(args.path)?;
+            save_project_package(&project, &args.output_dir)?;
+            print_saved_project_package(&args.output_dir);
             Ok(())
         }
         "functions" => {
@@ -445,6 +454,43 @@ fn read_lift_args(args: &mut impl Iterator<Item = String>) -> Result<LiftArgs, C
         target,
         count,
     })
+}
+
+fn read_save_args(args: &mut impl Iterator<Item = String>) -> Result<SaveArgs, CliError> {
+    let mut path = None;
+    let mut output_dir = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--out" => {
+                let Some(value) = args.next() else {
+                    return Err(CliError::Usage("missing value for save --out".to_string()));
+                };
+                if output_dir.replace(PathBuf::from(value)).is_some() {
+                    return Err(CliError::Usage(
+                        "save output directory specified more than once".to_string(),
+                    ));
+                }
+            }
+            _ if path.is_none() => path = Some(PathBuf::from(arg)),
+            _ => {
+                return Err(CliError::Usage(format!(
+                    "unexpected extra argument for save: {arg}"
+                )))
+            }
+        }
+    }
+
+    let Some(path) = path else {
+        return Err(CliError::Usage("missing file path for save".to_string()));
+    };
+    let Some(output_dir) = output_dir else {
+        return Err(CliError::Usage(
+            "save requires --out <project-dir>".to_string(),
+        ));
+    };
+
+    Ok(SaveArgs { path, output_dir })
 }
 
 fn read_network_args(args: &mut impl Iterator<Item = String>) -> Result<NetworkCommand, CliError> {
@@ -775,6 +821,7 @@ fn print_usage() {
     eprintln!("  kaiju lift <file> (--entry | --addr ADDRESS) [--count N]");
     eprintln!("  kaiju analyze <file>");
     eprintln!("  kaiju export <file>");
+    eprintln!("  kaiju save <file> --out <project-dir>");
     eprintln!("  kaiju functions <file>");
     eprintln!("  kaiju ir <file>");
     eprintln!("  kaiju symbols <file>");
@@ -1146,6 +1193,109 @@ fn analyze_project(path: PathBuf) -> KaijuResult<(Project, Vec<AnalysisReport>)>
     Ok((project, reports))
 }
 
+fn save_project_package(project: &Project, output_dir: &Path) -> KaijuResult<()> {
+    prepare_project_package_dir(output_dir)?;
+    write_package_file(
+        &output_dir.join("manifest.json"),
+        &project_package_manifest_json(project),
+    )?;
+    write_package_file(&output_dir.join("project.json"), &project.to_json_pretty())?;
+    write_package_file(
+        &output_dir.join("annotations.json"),
+        &empty_annotations_json(),
+    )?;
+    Ok(())
+}
+
+fn prepare_project_package_dir(output_dir: &Path) -> KaijuResult<()> {
+    if output_dir.exists() {
+        if !output_dir.is_dir() {
+            return Err(KaijuError::new(
+                KaijuErrorKind::Io,
+                format!(
+                    "project package output is not a directory: {}",
+                    output_dir.display()
+                ),
+            ));
+        }
+
+        if fs::read_dir(output_dir)?.next().is_some() {
+            return Err(KaijuError::new(
+                KaijuErrorKind::Io,
+                format!(
+                    "project package output directory is not empty: {}",
+                    output_dir.display()
+                ),
+            ));
+        }
+        return Ok(());
+    }
+
+    fs::create_dir_all(output_dir)?;
+    Ok(())
+}
+
+fn write_package_file(path: &Path, contents: &str) -> KaijuResult<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(contents.as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn project_package_manifest_json(project: &Project) -> String {
+    let summary = project.summary();
+    let entrypoint = project.binary.entrypoint.map_or_else(
+        || "null".to_string(),
+        |address| json_string(&address.to_string()),
+    );
+
+    format!(
+        concat!(
+            "{{\n",
+            "  \"schema\": \"kaiju.package.v1\",\n",
+            "  \"project_schema\": \"kaiju.project.v1\",\n",
+            "  \"source\": {{\n",
+            "    \"path\": {},\n",
+            "    \"file_size\": {},\n",
+            "    \"format\": {},\n",
+            "    \"architecture\": {},\n",
+            "    \"endian\": {},\n",
+            "    \"entrypoint\": {}\n",
+            "  }},\n",
+            "  \"files\": {{\n",
+            "    \"project\": \"project.json\",\n",
+            "    \"annotations\": \"annotations.json\"\n",
+            "  }}\n",
+            "}}"
+        ),
+        json_string(&summary.path),
+        summary.file_size,
+        json_string(&summary.format),
+        json_string(&summary.architecture),
+        json_string(&summary.endian),
+        entrypoint
+    )
+}
+
+fn empty_annotations_json() -> String {
+    concat!(
+        "{\n",
+        "  \"schema\": \"kaiju.annotations.v1\",\n",
+        "  \"labels\": [],\n",
+        "  \"comments\": []\n",
+        "}"
+    )
+    .to_string()
+}
+
+fn print_saved_project_package(output_dir: &Path) {
+    println!("Saved: {}", output_dir.display());
+    println!("Files:");
+    println!("- manifest.json");
+    println!("- project.json");
+    println!("- annotations.json");
+}
+
 fn run_network(command: NetworkCommand) -> KaijuResult<()> {
     match command {
         NetworkCommand::Evidence { path, format } => {
@@ -1403,6 +1553,25 @@ fn escape_string_value(value: &str) -> String {
         .collect::<String>()
 }
 
+fn json_string(value: &str) -> String {
+    let mut escaped = String::from("\"");
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => {
+                escaped.push_str(&format!("\\u{:04x}", u32::from(character)));
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
 #[derive(Debug)]
 struct StringsArgs {
     path: PathBuf,
@@ -1430,6 +1599,12 @@ struct LiftArgs {
     path: PathBuf,
     target: DisasmTarget,
     count: usize,
+}
+
+#[derive(Debug)]
+struct SaveArgs {
+    path: PathBuf,
+    output_dir: PathBuf,
 }
 
 #[derive(Debug)]

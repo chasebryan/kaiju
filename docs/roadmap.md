@@ -180,3 +180,9 @@ per-block IR text and unknown counts in project state, exports those rows in
 `kaiju.project.v1`, and exposes them through `kaiju ir <file>`. This makes
 lifting visible in the headless project workflow without claiming SSA, type
 recovery, stack recovery, complete instruction semantics, or decompiler output.
+
+The project-package slice added `kaiju save <file> --out <project-dir>`, which
+writes an initial `kaiju.package.v1` directory containing a manifest, the
+deterministic project snapshot, and a separate empty annotations file. It
+refuses non-empty output directories so regenerated analysis cannot overwrite
+future user-owned annotations by accident.

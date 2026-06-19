@@ -220,5 +220,7 @@ includes binary metadata, summary counts, discovered functions, block summaries,
 derived IR summaries, loader diagnostics, dependencies, symbols, imports,
 exports, relocations, strings, xrefs, and analysis facts.
 
-This is not a full project database. Future `.kaiju` persistence should keep
+The CLI can also write an initial `kaiju.package.v1` directory with a manifest,
+the deterministic project snapshot, and a separate empty annotations file. This
+is not a full editable project database. Future `.kaiju` persistence should keep
 user annotations separate from regenerated analysis facts.

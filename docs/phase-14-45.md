@@ -59,6 +59,7 @@ scripting runtime, or decompiler work:
 - conservative function discovery, bounded direct-call CFG expansion, and
   RIP-relative data/string xrefs.
 - bounded derived IR summaries for discovered CFG blocks.
+- initial `.kaiju` project package snapshots with separated annotations.
 - documented future boundaries for GUI, plugins, scripting, fuzzing, snapshots,
   and release readiness.
 

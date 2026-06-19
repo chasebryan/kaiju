@@ -50,6 +50,7 @@ what works:
   x86-64 basic blocks
 - bounded IR summaries for discovered x86-64 CFG blocks
 - project JSON export
+- safe `.kaiju` project package snapshots
 
 try:
 
@@ -65,6 +66,8 @@ cargo run -p kaiju-cli -- exports tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- relocations tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- analyze tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- export tests/fixtures/raw.bin
+KAIJU_SAVE_DIR=$(mktemp -d /tmp/kaiju-raw.XXXXXX.kaiju)
+cargo run -p kaiju-cli -- save tests/fixtures/raw.bin --out "$KAIJU_SAVE_DIR"
 cargo run -p kaiju-cli -- functions tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- ir tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- xrefs tests/fixtures/raw.bin

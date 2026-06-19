@@ -16,6 +16,7 @@ Guidelines:
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo test -p kaiju-loader --test hardening
 ```
 
 The GitHub Actions workflow runs the same gate plus raw-fixture smoke checks.

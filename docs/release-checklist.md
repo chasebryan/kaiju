@@ -12,6 +12,7 @@ cargo check --workspace
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo test -p kaiju-loader --test hardening
 ```
 
 ## CLI Smoke Checks
@@ -56,6 +57,8 @@ because raw input has no entrypoint and no known architecture.
 ## Security Checks
 
 - Parser changes include malformed-input tests.
+- Loader parser changes are covered by
+  `cargo test -p kaiju-loader --test hardening`.
 - New analysis paths return explicit errors or warnings.
 - No `unsafe` is introduced without a narrow documented reason.
 - No new feature enables malware deployment, evasion, credential theft,

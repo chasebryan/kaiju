@@ -35,10 +35,14 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      - name: Run loader hardening tests
+        run: cargo test -p kaiju-loader --test hardening
+
       - name: Smoke check raw fixture
         run: |
           cargo run -p kaiju-cli -- info tests/fixtures/raw.bin
           cargo run -p kaiju-cli -- map tests/fixtures/raw.bin
+          cargo run -p kaiju-cli -- diagnostics tests/fixtures/raw.bin
           cargo run -p kaiju-cli -- strings tests/fixtures/raw.bin
           cargo run -p kaiju-cli -- analyze tests/fixtures/raw.bin
           cargo run -p kaiju-cli -- export tests/fixtures/raw.bin

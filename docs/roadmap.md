@@ -125,3 +125,8 @@ The PE COFF symbol slice added bounded COFF symbol-table parsing for inline and
 string-table names, auxiliary-entry skipping, section-relative symbol addresses,
 malformed COFF symbol tests, and CLI coverage for PE symbols without claiming
 debug/PDB metadata.
+
+The loader hardening gate slice added a dependency-free integration test over
+hostile magic headers and deterministic byte mutations, documented the direct
+`cargo test -p kaiju-loader --test hardening` gate, and made CI run that gate
+by name alongside the full workspace tests.

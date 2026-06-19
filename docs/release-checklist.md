@@ -68,6 +68,7 @@ because raw input has no entrypoint and no known architecture.
 - Parser changes include malformed-input tests.
 - Loader parser changes are covered by
   `cargo test -p kaiju-loader --test hardening`.
+- Universal/fat Mach-O changes include member-table and member-range tests.
 - Mach-O relocation changes include bounded table and section-relative address
   tests.
 - New analysis paths return explicit errors or warnings.

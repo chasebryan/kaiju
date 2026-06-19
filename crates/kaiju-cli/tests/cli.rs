@@ -355,6 +355,33 @@ fn cli_reports_mach_o_metadata_and_diagnostic() {
 }
 
 #[test]
+fn cli_reports_mach_o_universal_metadata_and_diagnostic() {
+    let path = write_temp_mach_o_universal_fixture();
+
+    let info = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("info")
+        .arg(&path)
+        .output()
+        .expect("run kaiju info on universal Mach-O");
+    assert!(info.status.success());
+    let stdout = String::from_utf8(info.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Format: Mach-O"));
+    assert!(stdout.contains("Architecture: x86_64"));
+    assert!(stdout.contains("Entrypoint: 0x0000000100000100"));
+
+    let diagnostics = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("diagnostics")
+        .arg(&path)
+        .output()
+        .expect("run kaiju diagnostics on universal Mach-O");
+    assert!(diagnostics.status.success());
+    let stdout = String::from_utf8(diagnostics.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("universal binary selected x86_64 member"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn cli_symbols_reports_mach_o_symbols() {
     let path = write_temp_mach_o_symbol_fixture();
 
@@ -1384,6 +1411,20 @@ fn write_temp_mach_o_relocation_fixture() -> PathBuf {
     path
 }
 
+fn write_temp_mach_o_universal_fixture() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "kaiju-cli-macho-universal-{}-{unique}.bin",
+        process::id()
+    ));
+    fs::write(&path, synthetic_mach_o_universal_with_thin_member())
+        .expect("write universal Mach-O fixture");
+    path
+}
+
 fn write_temp_strings_fixture() -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2105,6 +2146,21 @@ fn synthetic_mach_o64_le_with_relocations() -> Vec<u8> {
     bytes
 }
 
+fn synthetic_mach_o_universal_with_thin_member() -> Vec<u8> {
+    let thin = synthetic_mach_o64_le();
+    let member_offset = 0x100;
+    let mut bytes = vec![0_u8; member_offset + thin.len()];
+    bytes[0..4].copy_from_slice(&[0xca, 0xfe, 0xba, 0xbe]);
+    write_u32_be(&mut bytes, 4, 1);
+    write_u32_be(&mut bytes, 8, 0x0100_0007);
+    write_u32_be(&mut bytes, 12, 3);
+    write_u32_be(&mut bytes, 16, member_offset as u32);
+    write_u32_be(&mut bytes, 20, thin.len() as u32);
+    write_u32_be(&mut bytes, 24, 12);
+    bytes[member_offset..member_offset + thin.len()].copy_from_slice(&thin);
+    bytes
+}
+
 fn mach_o64_symtab_command_offset() -> usize {
     const MACHO64_HEADER_SIZE: usize = 32;
     const MACHO64_SEGMENT_COMMAND_SIZE: usize = 72;
@@ -2220,6 +2276,10 @@ fn write_u32_le(bytes: &mut [u8], offset: usize, value: u32) {
 
 fn write_u64_le(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_u32_be(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
 }
 
 fn assert_raw_snapshot(args: &[&str], snapshot_name: &str) {

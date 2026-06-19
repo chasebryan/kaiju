@@ -94,7 +94,7 @@ behavior visible without changing the stable `info` or `map` summaries.
 The Mach-O loader slice replaced magic-only handling for thin Mach-O files with
 limited CPU/endian metadata parsing, `LC_SEGMENT` / `LC_SEGMENT_64` memory maps,
 section metadata, `LC_MAIN` entrypoint translation, and malformed command/segment
-tests while keeping universal/fat binaries conservative.
+tests while leaving full universal/fat member policy to later slices.
 
 The ELF symbol slice added defensive `.symtab` / `.dynsym` extraction through
 linked string tables, malformed symbol-table tests, and CLI coverage for symbol
@@ -136,7 +136,7 @@ The Mach-O symbol slice added bounded `LC_SYMTAB` parsing for nlist32/nlist64
 rows, string-table-backed symbol names, undefined external import rows,
 malformed symbol/string-table tests, and CLI coverage for Mach-O `symbols` and
 `imports` output without claiming relocations, dylib binding metadata, or
-universal/fat member selection.
+full universal/fat selection policy.
 
 The shared-library dependency slice added normalized dependency rows for ELF
 `DT_NEEDED`, PE import DLL names, and Mach-O `LC_LOAD_DYLIB`, plus project
@@ -197,4 +197,11 @@ Mach-O inputs. It records normalized relocation addresses and kind strings from
 section `reloff` / `nreloc` tables, rejects relocation tables outside the file
 and relocation addresses outside their owning section, and exposes those rows
 through the existing `relocations`, project JSON, and package surfaces without
-claiming dynamic-loader binding metadata or universal/fat member selection.
+claiming dynamic-loader binding metadata or full universal/fat selection policy.
+
+The universal Mach-O slice replaced detection-only fat handling with bounded
+fat-header and member-table parsing. It selects a supported thin member for the
+existing thin Mach-O loader path, rejects truncated architecture tables,
+zero-sized members, and members outside the file, and reports the selected
+member through diagnostics without claiming a full multi-architecture selection
+policy or dynamic-loader binding metadata.

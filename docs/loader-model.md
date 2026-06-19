@@ -25,7 +25,8 @@ Kaiju loads bytes first, then normalizes recognized file formats into a common
   metadata, `LC_SEGMENT` / `LC_SEGMENT_64` memory maps, section metadata, and
   `LC_MAIN` entrypoints, plus `LC_SYMTAB` symbols and undefined external
   imports, plus `LC_LOAD_DYLIB` dependencies and section relocation entries.
-  Universal/fat Mach-O inputs are still detection-only.
+  Universal/fat Mach-O inputs are parsed enough to select a bounded supported
+  thin member for the same thin-loader path.
 - Raw: unknown inputs map at virtual address `0x0` with read-only permissions.
 
 ## Normalized Output
@@ -68,8 +69,9 @@ Current diagnostics include:
   address `0x0`
 - a note when thin Mach-O load commands are parsed with section relocation
   entries but without dynamic-loader binding metadata
-- a warning when universal/fat Mach-O magic is detected but no dedicated parser
-  is available
+- a note when a universal/fat Mach-O input selects a supported thin member
+- a warning when a universal/fat Mach-O input contains no supported thin member
+  and falls back to a single file-backed region
 - notes that ELF and PE loading currently populate only limited metadata
 - warnings when ELF or PE inputs fall back to file-backed bytes because no
   mappable regions were found
@@ -87,6 +89,6 @@ Loader code must:
 ## Future Work
 
 The next loader expansions should add ELF dependency version resolution, PE
-debug/PDB metadata, richer Mach-O dynamic-loader metadata, universal/fat Mach-O
-member selection, and fuzz targets for malformed headers and inconsistent
-section/segment tables.
+debug/PDB metadata, richer Mach-O dynamic-loader metadata, richer universal/fat
+Mach-O member-selection policy, and fuzz targets for malformed headers and
+inconsistent section/segment tables.

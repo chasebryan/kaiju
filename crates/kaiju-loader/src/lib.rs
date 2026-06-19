@@ -154,94 +154,9 @@ impl Loader for MachOLoader {
         };
 
         match magic {
-            MachOMagic::Fat { endian } => Ok(load_as_single_region(
-                path,
-                bytes,
-                BinaryFormat::MachO,
-                endian,
-                "macho-file",
-                vec![loader_warning(
-                    "Mach-O universal binary parsing is not implemented; loaded file as read-only bytes at virtual address 0x0",
-                )],
-            )),
+            MachOMagic::Fat { endian, is_64 } => load_fat_mach_o(path, bytes, endian, is_64),
             MachOMagic::Thin { endian, is_64 } => {
-                let header = parse_mach_o_header(bytes, endian, is_64)?;
-                let commands = parse_mach_o_load_commands(bytes, &header)?;
-                let mut memory_map = MemoryMap::new();
-                let mut sections = Vec::new();
-                let mut diagnostics = vec![loader_note(
-                    "Mach-O loader uses limited load-command parsing; section relocation entries are parsed without dynamic loader binding metadata",
-                )];
-                let mut relocations = Vec::new();
-
-                for segment in commands.segments {
-                    if segment.size == 0 {
-                        append_mach_o_sections(segment.sections, &mut sections, &mut relocations);
-                        continue;
-                    }
-
-                    if segment.file_size > segment.size {
-                        return Err(malformed("Mach-O segment file size exceeds VM size"));
-                    }
-
-                    let initialized_bytes = match segment.file_offset {
-                        Some(offset) => {
-                            checked_range(bytes, offset, segment.file_size, "Mach-O segment data")?
-                                .to_vec()
-                        }
-                        None => Vec::new(),
-                    };
-                    let region = MemoryRegion::new_with_size(
-                        segment.name,
-                        segment.address,
-                        segment.file_offset,
-                        segment.size,
-                        segment.permissions,
-                        initialized_bytes,
-                    )?;
-                    memory_map.add_region(region);
-                    append_mach_o_sections(segment.sections, &mut sections, &mut relocations);
-                }
-
-                if memory_map.regions().is_empty() {
-                    diagnostics.push(loader_warning(
-                        "Mach-O contained no mappable segments; loaded file as read-only bytes at virtual address 0x0",
-                    ));
-                    memory_map.add_region(MemoryRegion::new(
-                        "macho-file",
-                        Address::ZERO,
-                        Some(0),
-                        Permissions::read_only(),
-                        bytes.to_vec(),
-                    ));
-                }
-
-                let entrypoint = commands
-                    .entrypoint_file_offset
-                    .and_then(|file_offset| memory_map.translate_file_offset_to_virtual(file_offset));
-                if commands.entrypoint_file_offset.is_some() && entrypoint.is_none() {
-                    diagnostics.push(loader_warning(
-                        "Mach-O entrypoint file offset did not map to a virtual address",
-                    ));
-                }
-
-                Ok(LoadedBinary {
-                    path,
-                    file_size: bytes.len() as u64,
-                    bytes: bytes.to_vec(),
-                    format: BinaryFormat::MachO,
-                    endian,
-                    arch: header.arch,
-                    entrypoint,
-                    memory_map,
-                    sections,
-                    dependencies: commands.dependencies,
-                    symbols: commands.symbols,
-                    imports: commands.imports,
-                    exports: Vec::new(),
-                    relocations,
-                    diagnostics,
-                })
+                load_thin_mach_o(path, bytes, endian, is_64, Vec::new())
             }
         }
     }
@@ -520,6 +435,9 @@ const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
 const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
 const MACHO32_HEADER_SIZE: u64 = 28;
 const MACHO64_HEADER_SIZE: u64 = 32;
+const MACHO_FAT_HEADER_SIZE: u64 = 8;
+const MACHO_FAT_ARCH_SIZE: u64 = 20;
+const MACHO_FAT_ARCH64_SIZE: u64 = 32;
 const MACHO32_SEGMENT_COMMAND_SIZE: u64 = 56;
 const MACHO64_SEGMENT_COMMAND_SIZE: u64 = 72;
 const MACHO32_SECTION_SIZE: u64 = 68;
@@ -650,7 +568,7 @@ struct PeSection {
 #[derive(Debug, Clone, Copy)]
 enum MachOMagic {
     Thin { endian: Endian, is_64: bool },
-    Fat { endian: Endian },
+    Fat { endian: Endian, is_64: bool },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -661,6 +579,13 @@ struct MachOHeader {
     command_size: u64,
     is_64: bool,
     endian: Endian,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MachOFatMember {
+    arch: ArchitectureId,
+    offset: u64,
+    size: u64,
 }
 
 #[derive(Debug, Default)]
@@ -737,6 +662,212 @@ fn loader_note(message: impl Into<String>) -> Diagnostic {
 
 fn loader_warning(message: impl Into<String>) -> Diagnostic {
     Diagnostic::new(DiagnosticSeverity::Warning, message)
+}
+
+fn load_fat_mach_o(
+    path: PathBuf,
+    bytes: &[u8],
+    endian: Endian,
+    is_64: bool,
+) -> Result<LoadedBinary> {
+    if bytes.len() < MACHO_FAT_HEADER_SIZE as usize {
+        return Ok(load_as_single_region(
+            path,
+            bytes,
+            BinaryFormat::MachO,
+            endian,
+            "macho-file",
+            vec![loader_warning(
+                "Mach-O universal header is truncated; loaded file as read-only bytes at virtual address 0x0",
+            )],
+        ));
+    }
+
+    let members = parse_mach_o_fat_members(bytes, endian, is_64)?;
+
+    for member in members {
+        let member_bytes = checked_range(bytes, member.offset, member.size, "Mach-O fat member")?;
+        if let Some(MachOMagic::Thin {
+            endian: member_endian,
+            is_64: member_is_64,
+        }) = mach_o_magic(member_bytes)
+        {
+            return load_thin_mach_o(
+                path,
+                member_bytes,
+                member_endian,
+                member_is_64,
+                vec![loader_note(format!(
+                    "Mach-O universal binary selected {} member at file offset 0x{:x} with size {} bytes",
+                    member.arch, member.offset, member.size
+                ))],
+            );
+        }
+    }
+
+    Ok(load_as_single_region(
+        path,
+        bytes,
+        BinaryFormat::MachO,
+        endian,
+        "macho-file",
+        vec![loader_warning(
+            "Mach-O universal binary contained no supported thin member; loaded file as read-only bytes at virtual address 0x0",
+        )],
+    ))
+}
+
+fn load_thin_mach_o(
+    path: PathBuf,
+    bytes: &[u8],
+    endian: Endian,
+    is_64: bool,
+    mut diagnostics: Vec<Diagnostic>,
+) -> Result<LoadedBinary> {
+    let header = parse_mach_o_header(bytes, endian, is_64)?;
+    let commands = parse_mach_o_load_commands(bytes, &header)?;
+    let mut memory_map = MemoryMap::new();
+    let mut sections = Vec::new();
+    diagnostics.push(loader_note(
+        "Mach-O loader uses limited load-command parsing; section relocation entries are parsed without dynamic loader binding metadata",
+    ));
+    let mut relocations = Vec::new();
+
+    for segment in commands.segments {
+        if segment.size == 0 {
+            append_mach_o_sections(segment.sections, &mut sections, &mut relocations);
+            continue;
+        }
+
+        if segment.file_size > segment.size {
+            return Err(malformed("Mach-O segment file size exceeds VM size"));
+        }
+
+        let initialized_bytes = match segment.file_offset {
+            Some(offset) => {
+                checked_range(bytes, offset, segment.file_size, "Mach-O segment data")?.to_vec()
+            }
+            None => Vec::new(),
+        };
+        let region = MemoryRegion::new_with_size(
+            segment.name,
+            segment.address,
+            segment.file_offset,
+            segment.size,
+            segment.permissions,
+            initialized_bytes,
+        )?;
+        memory_map.add_region(region);
+        append_mach_o_sections(segment.sections, &mut sections, &mut relocations);
+    }
+
+    if memory_map.regions().is_empty() {
+        diagnostics.push(loader_warning(
+            "Mach-O contained no mappable segments; loaded file as read-only bytes at virtual address 0x0",
+        ));
+        memory_map.add_region(MemoryRegion::new(
+            "macho-file",
+            Address::ZERO,
+            Some(0),
+            Permissions::read_only(),
+            bytes.to_vec(),
+        ));
+    }
+
+    let entrypoint = commands
+        .entrypoint_file_offset
+        .and_then(|file_offset| memory_map.translate_file_offset_to_virtual(file_offset));
+    if commands.entrypoint_file_offset.is_some() && entrypoint.is_none() {
+        diagnostics.push(loader_warning(
+            "Mach-O entrypoint file offset did not map to a virtual address",
+        ));
+    }
+
+    Ok(LoadedBinary {
+        path,
+        file_size: bytes.len() as u64,
+        bytes: bytes.to_vec(),
+        format: BinaryFormat::MachO,
+        endian,
+        arch: header.arch,
+        entrypoint,
+        memory_map,
+        sections,
+        dependencies: commands.dependencies,
+        symbols: commands.symbols,
+        imports: commands.imports,
+        exports: Vec::new(),
+        relocations,
+        diagnostics,
+    })
+}
+
+fn parse_mach_o_fat_members(
+    bytes: &[u8],
+    endian: Endian,
+    is_64: bool,
+) -> Result<Vec<MachOFatMember>> {
+    checked_range(bytes, 0, MACHO_FAT_HEADER_SIZE, "Mach-O universal header")?;
+    let member_count = read_u32(bytes, 4, endian, "Mach-O universal architecture count")?;
+    let entry_size = if is_64 {
+        MACHO_FAT_ARCH64_SIZE
+    } else {
+        MACHO_FAT_ARCH_SIZE
+    };
+    let table_size = checked_table_size(
+        MACHO_FAT_HEADER_SIZE,
+        entry_size,
+        member_count,
+        "Mach-O universal architecture table",
+    )?;
+    checked_range(bytes, 0, table_size, "Mach-O universal architecture table")?;
+
+    let mut members = Vec::with_capacity(
+        usize::try_from(member_count)
+            .map_err(|_| malformed("Mach-O universal architecture count does not fit in usize"))?,
+    );
+    for index in 0..member_count {
+        let base = table_entry_offset_u32(
+            MACHO_FAT_HEADER_SIZE,
+            entry_size,
+            index,
+            "Mach-O universal architecture table",
+        )?;
+        let cpu_type = read_u32(bytes, base, endian, "Mach-O universal CPU type")?;
+        let (offset, size) = if is_64 {
+            (
+                read_u64(bytes, base + 8, endian, "Mach-O universal member offset")?,
+                read_u64(bytes, base + 16, endian, "Mach-O universal member size")?,
+            )
+        } else {
+            (
+                u64::from(read_u32(
+                    bytes,
+                    base + 8,
+                    endian,
+                    "Mach-O universal member offset",
+                )?),
+                u64::from(read_u32(
+                    bytes,
+                    base + 12,
+                    endian,
+                    "Mach-O universal member size",
+                )?),
+            )
+        };
+
+        if size == 0 {
+            return Err(malformed("Mach-O universal member size is zero"));
+        }
+        checked_range(bytes, offset, size, "Mach-O universal member")?;
+        members.push(MachOFatMember {
+            arch: mach_o_cpu_type_to_arch(cpu_type),
+            offset,
+            size,
+        });
+    }
+
+    Ok(members)
 }
 
 fn parse_mach_o_header(bytes: &[u8], endian: Endian, is_64: bool) -> Result<MachOHeader> {
@@ -3461,9 +3592,19 @@ fn mach_o_magic(bytes: &[u8]) -> Option<MachOMagic> {
         }),
         Some([0xca, 0xfe, 0xba, 0xbe]) => Some(MachOMagic::Fat {
             endian: Endian::Big,
+            is_64: false,
         }),
         Some([0xbe, 0xba, 0xfe, 0xca]) => Some(MachOMagic::Fat {
             endian: Endian::Little,
+            is_64: false,
+        }),
+        Some([0xca, 0xfe, 0xba, 0xbf]) => Some(MachOMagic::Fat {
+            endian: Endian::Big,
+            is_64: true,
+        }),
+        Some([0xbf, 0xba, 0xfe, 0xca]) => Some(MachOMagic::Fat {
+            endian: Endian::Little,
+            is_64: true,
         }),
         _ => None,
     }
@@ -3620,6 +3761,10 @@ mod tests {
             detect_format(&[0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0]),
             BinaryFormat::MachO
         );
+        assert_eq!(
+            detect_format(&[0xca, 0xfe, 0xba, 0xbf, 0, 0, 0, 0]),
+            BinaryFormat::MachO
+        );
     }
 
     #[test]
@@ -3716,7 +3861,42 @@ mod tests {
     }
 
     #[test]
-    fn mach_o_fat_load_uses_detection_only_diagnostic() {
+    fn loads_mach_o_universal_thin_member() {
+        let bytes = synthetic_mach_o_universal_with_thin_member();
+        let binary = load_bytes(PathBuf::from("universal.macho"), &bytes).expect("load Mach-O");
+
+        assert_eq!(binary.format, BinaryFormat::MachO);
+        assert_eq!(binary.arch, ArchitectureId::X86_64);
+        assert_eq!(binary.endian, Endian::Little);
+        assert_eq!(binary.entrypoint, Some(Address::new(0x100000100)));
+        assert_eq!(binary.file_size, synthetic_mach_o64_le().len() as u64);
+        assert_eq!(binary.memory_map.regions().len(), 1);
+        assert!(binary.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Note
+                && diagnostic
+                    .message
+                    .contains("universal binary selected x86_64 member")
+        }));
+    }
+
+    #[test]
+    fn loads_mach_o_universal64_thin_member() {
+        let bytes = synthetic_mach_o_universal64_with_thin_member();
+        let binary = load_bytes(PathBuf::from("universal.macho"), &bytes).expect("load Mach-O");
+
+        assert_eq!(binary.format, BinaryFormat::MachO);
+        assert_eq!(binary.arch, ArchitectureId::X86_64);
+        assert_eq!(binary.entrypoint, Some(Address::new(0x100000100)));
+        assert!(binary.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Note
+                && diagnostic
+                    .message
+                    .contains("universal binary selected x86_64 member")
+        }));
+    }
+
+    #[test]
+    fn mach_o_fat_without_members_loads_as_raw_diagnostic() {
         let bytes = [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 0];
         let binary = load_bytes(PathBuf::from("fat.macho"), &bytes).expect("load Mach-O");
 
@@ -3726,7 +3906,9 @@ mod tests {
         assert_eq!(binary.memory_map.regions().len(), 1);
         assert!(binary.diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Warning
-                && diagnostic.message.contains("universal binary parsing")
+                && diagnostic
+                    .message
+                    .contains("contained no supported thin member")
         }));
     }
 
@@ -3841,6 +4023,48 @@ mod tests {
     fn truncated_mach_o_returns_clean_error() {
         let error = load_bytes(PathBuf::from("bad.macho"), &[0xcf, 0xfa, 0xed, 0xfe])
             .expect_err("truncated Mach-O should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn mach_o_fat_arch_table_truncated_returns_clean_error() {
+        let mut bytes = vec![0_u8; 16];
+        bytes[0..4].copy_from_slice(&[0xca, 0xfe, 0xba, 0xbe]);
+        write_u32_be(&mut bytes, 4, 1);
+
+        let error =
+            load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn mach_o_fat_member_outside_file_returns_clean_error() {
+        let mut bytes = vec![0_u8; 0x40];
+        bytes[0..4].copy_from_slice(&[0xca, 0xfe, 0xba, 0xbe]);
+        write_u32_be(&mut bytes, 4, 1);
+        write_u32_be(&mut bytes, 8, CPU_TYPE_X86_64);
+        write_u32_be(&mut bytes, 16, 0x1000);
+        write_u32_be(&mut bytes, 20, 0x20);
+
+        let error =
+            load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn mach_o_fat_zero_sized_member_returns_clean_error() {
+        let mut bytes = vec![0_u8; 0x40];
+        bytes[0..4].copy_from_slice(&[0xca, 0xfe, 0xba, 0xbe]);
+        write_u32_be(&mut bytes, 4, 1);
+        write_u32_be(&mut bytes, 8, CPU_TYPE_X86_64);
+        write_u32_be(&mut bytes, 16, 0x20);
+        write_u32_be(&mut bytes, 20, 0);
+
+        let error =
+            load_bytes(PathBuf::from("bad.macho"), &bytes).expect_err("bad Mach-O should fail");
 
         assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
     }
@@ -4603,6 +4827,36 @@ mod tests {
         bytes
     }
 
+    fn synthetic_mach_o_universal_with_thin_member() -> Vec<u8> {
+        let thin = synthetic_mach_o64_le();
+        let member_offset = 0x100;
+        let mut bytes = vec![0_u8; member_offset + thin.len()];
+        bytes[0..4].copy_from_slice(&[0xca, 0xfe, 0xba, 0xbe]);
+        write_u32_be(&mut bytes, 4, 1);
+        write_u32_be(&mut bytes, 8, CPU_TYPE_X86_64);
+        write_u32_be(&mut bytes, 12, 3);
+        write_u32_be(&mut bytes, 16, member_offset as u32);
+        write_u32_be(&mut bytes, 20, thin.len() as u32);
+        write_u32_be(&mut bytes, 24, 12);
+        bytes[member_offset..member_offset + thin.len()].copy_from_slice(&thin);
+        bytes
+    }
+
+    fn synthetic_mach_o_universal64_with_thin_member() -> Vec<u8> {
+        let thin = synthetic_mach_o64_le();
+        let member_offset = 0x100;
+        let mut bytes = vec![0_u8; member_offset + thin.len()];
+        bytes[0..4].copy_from_slice(&[0xca, 0xfe, 0xba, 0xbf]);
+        write_u32_be(&mut bytes, 4, 1);
+        write_u32_be(&mut bytes, 8, CPU_TYPE_X86_64);
+        write_u32_be(&mut bytes, 12, 3);
+        write_u64_be(&mut bytes, 16, member_offset as u64);
+        write_u64_be(&mut bytes, 24, thin.len() as u64);
+        write_u32_be(&mut bytes, 32, 12);
+        bytes[member_offset..member_offset + thin.len()].copy_from_slice(&thin);
+        bytes
+    }
+
     fn mach_o64_text_section_offset() -> usize {
         MACHO64_HEADER_SIZE as usize + MACHO64_SEGMENT_COMMAND_SIZE as usize
     }
@@ -4988,5 +5242,13 @@ mod tests {
 
     fn write_u64_le(bytes: &mut [u8], offset: usize, value: u64) {
         bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u32_be(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+    }
+
+    fn write_u64_be(bytes: &mut [u8], offset: usize, value: u64) {
+        bytes[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
     }
 }

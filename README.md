@@ -24,6 +24,7 @@ what works:
 - limited ELF, PE, and Mach-O metadata
 - memory maps
 - Mach-O segment maps
+- Mach-O universal/fat member selection
 - ELF symbol tables
 - ELF shared-library dependencies
 - ELF dynamic imports

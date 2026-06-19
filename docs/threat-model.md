@@ -52,8 +52,8 @@ binaries. The default stance is defensive parsing.
   block-overrun parsing tests.
 - Bounded PE COFF symbol table, string-table name, section-index, and
   auxiliary-entry parsing tests.
-- Bounded Mach-O load-command, segment, symbol-table, string-table, and
-  section-relocation parsing tests.
+- Bounded Mach-O universal/fat header, member-range, load-command, segment,
+  symbol-table, string-table, and section-relocation parsing tests.
 
 ## Required Rules
 

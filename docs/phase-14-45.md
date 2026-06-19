@@ -62,6 +62,7 @@ scripting runtime, or decompiler work:
 - initial `.kaiju` project package snapshots with separated annotations.
 - read-only `.kaiju` package inspection and schema validation.
 - bounded Mach-O section relocation parsing.
+- bounded universal/fat Mach-O member selection.
 - documented future boundaries for GUI, plugins, scripting, fuzzing, snapshots,
   and release readiness.
 

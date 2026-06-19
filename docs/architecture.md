@@ -38,12 +38,13 @@ entrypoint, program headers, section headers, section names, `.symtab` /
 `.dynsym` symbol names, undefined dynamic imports, REL/RELA relocation rows, and
 `PT_LOAD` regions. PE has a limited defensive parser for PE32/PE32+, COFF
 machine, optional-header image base and entrypoint, section headers, section
-names, section-backed memory regions, import tables, export tables, and base
-relocation tables. Mach-O has a limited thin parser for CPU/endian metadata,
-`LC_SEGMENT` / `LC_SEGMENT_64` memory maps, section metadata, and `LC_MAIN`
-entrypoint translation. Universal/fat Mach-O handling remains detection-only.
-Full parsing of ELF dependency/version resolution, COFF symbols, Mach-O
-relocations, and format-specific edge cases is deferred.
+names, section-backed memory regions, COFF symbol tables, import tables, export
+tables, and base relocation tables. Mach-O has a limited thin parser for
+CPU/endian metadata, `LC_SEGMENT` / `LC_SEGMENT_64` memory maps, section
+metadata, and `LC_MAIN` entrypoint translation. Universal/fat Mach-O handling
+remains detection-only. Full parsing of ELF dependency/version resolution,
+PE debug/PDB metadata, Mach-O relocations, and format-specific edge cases is
+deferred.
 
 Loader diagnostics are attached to the normalized `LoadedBinary` model. They
 report conservative behavior such as raw fallback loading, limited Mach-O

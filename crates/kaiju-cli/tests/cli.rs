@@ -539,6 +539,27 @@ fn cli_symbols_reports_loader_symbols() {
 }
 
 #[test]
+fn cli_symbols_reports_pe_coff_symbols() {
+    let path = write_temp_pe_symbol_fixture();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
+        .arg("symbols")
+        .arg(&path)
+        .output()
+        .expect("run kaiju symbols on PE");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
+    assert!(stdout.contains("Name  Address"));
+    assert!(stdout.contains("_start"));
+    assert!(stdout.contains("0x0000000140001000"));
+    assert!(stdout.contains("helper_long_name"));
+    assert!(stdout.contains("0x0000000140001004"));
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn cli_imports_reports_header_for_files_without_imports() {
     let output = Command::new(env!("CARGO_BIN_EXE_kaiju"))
         .arg("imports")
@@ -679,6 +700,19 @@ fn write_temp_pe_fixture() -> PathBuf {
         .as_nanos();
     let path = std::env::temp_dir().join(format!("kaiju-cli-pe-{}-{unique}.exe", process::id()));
     fs::write(&path, synthetic_pe32_plus()).expect("write PE fixture");
+    path
+}
+
+fn write_temp_pe_symbol_fixture() -> PathBuf {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time should be after epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "kaiju-cli-pe-symbols-{}-{unique}.exe",
+        process::id()
+    ));
+    fs::write(&path, synthetic_pe32_plus_with_coff_symbols()).expect("write PE symbol fixture");
     path
 }
 
@@ -1012,6 +1046,39 @@ fn write_elf64_rela(
     write_u64_le(bytes, offset + 16, addend);
 }
 
+fn write_pe_coff_short_symbol(
+    bytes: &mut [u8],
+    offset: usize,
+    name: &[u8; 8],
+    value: u32,
+    section_number: u16,
+    auxiliary_count: u8,
+) {
+    bytes[offset..offset + 8].copy_from_slice(name);
+    write_u32_le(bytes, offset + 8, value);
+    write_u16_le(bytes, offset + 12, section_number);
+    write_u16_le(bytes, offset + 14, 0x20);
+    bytes[offset + 16] = 2;
+    bytes[offset + 17] = auxiliary_count;
+}
+
+fn write_pe_coff_long_symbol(
+    bytes: &mut [u8],
+    offset: usize,
+    string_offset: u32,
+    value: u32,
+    section_number: u16,
+    auxiliary_count: u8,
+) {
+    write_u32_le(bytes, offset, 0);
+    write_u32_le(bytes, offset + 4, string_offset);
+    write_u32_le(bytes, offset + 8, value);
+    write_u16_le(bytes, offset + 12, section_number);
+    write_u16_le(bytes, offset + 14, 0x20);
+    bytes[offset + 16] = 2;
+    bytes[offset + 17] = auxiliary_count;
+}
+
 fn synthetic_pe32_plus() -> Vec<u8> {
     let mut bytes = vec![0_u8; 0x400];
     bytes[0] = b'M';
@@ -1037,6 +1104,21 @@ fn synthetic_pe32_plus() -> Vec<u8> {
     write_u32_le(&mut bytes, section + 20, 0x200);
     write_u32_le(&mut bytes, section + 36, 0x6000_0000);
     bytes[0x200..0x204].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
+
+    bytes
+}
+
+fn synthetic_pe32_plus_with_coff_symbols() -> Vec<u8> {
+    let mut bytes = synthetic_pe32_plus();
+    bytes.resize(0x800, 0);
+
+    let coff = 0x104;
+    write_u32_le(&mut bytes, coff + 8, 0x400);
+    write_u32_le(&mut bytes, coff + 12, 3);
+    write_pe_coff_short_symbol(&mut bytes, 0x400, b"_start\0\0", 0, 1, 0);
+    write_pe_coff_long_symbol(&mut bytes, 0x412, 4, 4, 1, 1);
+    write_u32_le(&mut bytes, 0x436, 21);
+    bytes[0x43a..0x44b].copy_from_slice(b"helper_long_name\0");
 
     bytes
 }

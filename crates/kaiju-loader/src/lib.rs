@@ -253,12 +253,13 @@ impl Loader for PeLoader {
     fn load(&self, path: PathBuf, bytes: &[u8]) -> Result<LoadedBinary> {
         let header = parse_pe_header(bytes)?;
         let sections = parse_pe_sections(bytes, &header)?;
+        let symbols = parse_pe_symbols(bytes, &header, &sections)?;
         let imports = parse_pe_imports(bytes, &header, &sections)?;
         let exports = parse_pe_exports(bytes, &header, &sections)?;
         let relocations = parse_pe_relocations(bytes, &header, &sections)?;
         let mut memory_map = MemoryMap::new();
         let mut diagnostics = vec![loader_note(
-            "PE loader uses limited metadata parsing; COFF symbols are not yet populated",
+            "PE loader uses limited metadata parsing; debug symbols and rich metadata are not yet populated",
         )];
 
         for section in &sections {
@@ -315,7 +316,7 @@ impl Loader for PeLoader {
                     permissions: section.permissions,
                 })
                 .collect(),
-            symbols: Vec::new(),
+            symbols,
             imports,
             exports,
             relocations,
@@ -482,6 +483,7 @@ const PE_IMPORT_DESCRIPTOR_SIZE: u64 = 20;
 const PE_EXPORT_ADDRESS_TABLE_ENTRY_SIZE: u64 = 4;
 const PE_EXPORT_NAME_POINTER_ENTRY_SIZE: u64 = 4;
 const PE_EXPORT_ORDINAL_TABLE_ENTRY_SIZE: u64 = 2;
+const PE_COFF_SYMBOL_SIZE: u64 = 18;
 const PE_BASE_RELOCATION_BLOCK_HEADER_SIZE: u64 = 8;
 const PE_BASE_RELOCATION_ENTRY_SIZE: u64 = 2;
 const IMAGE_REL_BASED_ABSOLUTE: u16 = 0;
@@ -595,6 +597,8 @@ struct PeHeader {
     entrypoint: Option<Address>,
     section_table_offset: u64,
     section_count: u16,
+    symbol_table_offset: u32,
+    symbol_count: u32,
     export_directory: Option<PeDataDirectory>,
     import_directory: Option<PeDataDirectory>,
     base_relocation_directory: Option<PeDataDirectory>,
@@ -995,6 +999,18 @@ fn parse_pe_header(bytes: &[u8]) -> Result<PeHeader> {
     checked_range(bytes, coff_offset, PE_COFF_HEADER_SIZE, "PE COFF header")?;
     let machine = read_u16(bytes, coff_offset, Endian::Little, "PE machine")?;
     let section_count = read_u16(bytes, coff_offset + 2, Endian::Little, "PE section count")?;
+    let symbol_table_offset = read_u32(
+        bytes,
+        coff_offset + 8,
+        Endian::Little,
+        "PE COFF symbol table offset",
+    )?;
+    let symbol_count = read_u32(
+        bytes,
+        coff_offset + 12,
+        Endian::Little,
+        "PE COFF symbol count",
+    )?;
     let optional_header_size = read_u16(
         bytes,
         coff_offset + 16,
@@ -1098,6 +1114,8 @@ fn parse_pe_header(bytes: &[u8]) -> Result<PeHeader> {
         entrypoint,
         section_table_offset,
         section_count,
+        symbol_table_offset,
+        symbol_count,
         export_directory,
         import_directory,
         base_relocation_directory,
@@ -1379,6 +1397,155 @@ fn pe_base_relocation_kind(relocation_type: u16) -> String {
         IMAGE_REL_BASED_DIR64 => "pe-dir64".to_string(),
         _ => format!("pe-unknown-{relocation_type}"),
     }
+}
+
+fn parse_pe_symbols(
+    bytes: &[u8],
+    header: &PeHeader,
+    sections: &[PeSection],
+) -> Result<Vec<Symbol>> {
+    if header.symbol_table_offset == 0 || header.symbol_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let symbol_count = u64::from(header.symbol_count);
+    let table_size = symbol_count
+        .checked_mul(PE_COFF_SYMBOL_SIZE)
+        .ok_or_else(|| malformed("PE COFF symbol table size overflow"))?;
+    let symbol_table_offset = u64::from(header.symbol_table_offset);
+    checked_range(
+        bytes,
+        symbol_table_offset,
+        table_size,
+        "PE COFF symbol table",
+    )?;
+    let string_table_offset = checked_add_offset(
+        symbol_table_offset,
+        table_size,
+        "PE COFF string table offset",
+    )?;
+    let string_table = pe_coff_string_table(bytes, string_table_offset)?;
+
+    let mut symbols = Vec::new();
+    let mut index = 0_u64;
+    while index < symbol_count {
+        let base = symbol_table_offset
+            .checked_add(
+                index
+                    .checked_mul(PE_COFF_SYMBOL_SIZE)
+                    .ok_or_else(|| malformed("PE COFF symbol table offset overflow"))?,
+            )
+            .ok_or_else(|| malformed("PE COFF symbol table offset overflow"))?;
+        let name = pe_coff_symbol_name(bytes, base, string_table)?;
+        let value = u64::from(read_u32(
+            bytes,
+            base + 8,
+            Endian::Little,
+            "PE COFF symbol value",
+        )?);
+        let section_number = read_u16(
+            bytes,
+            base + 12,
+            Endian::Little,
+            "PE COFF symbol section number",
+        )? as i16;
+        let auxiliary_count = u64::from(byte_at(
+            bytes,
+            usize::try_from(base + 17)
+                .map_err(|_| malformed("PE COFF auxiliary symbol count offset overflow"))?,
+            "PE COFF auxiliary symbol count",
+        )?);
+        let next_index = index
+            .checked_add(1)
+            .and_then(|next| next.checked_add(auxiliary_count))
+            .ok_or_else(|| malformed("PE COFF auxiliary symbol count overflow"))?;
+        if next_index > symbol_count {
+            return Err(malformed(
+                "PE COFF auxiliary symbol entries exceed symbol table",
+            ));
+        }
+
+        if !name.is_empty() {
+            symbols.push(Symbol {
+                name,
+                address: pe_coff_symbol_address(sections, section_number, value)?,
+            });
+        }
+        index = next_index;
+    }
+
+    Ok(symbols)
+}
+
+fn pe_coff_string_table(bytes: &[u8], offset: u64) -> Result<&[u8]> {
+    checked_range(bytes, offset, 4, "PE COFF string table size")?;
+    let size = u64::from(read_u32(
+        bytes,
+        offset,
+        Endian::Little,
+        "PE COFF string table size",
+    )?);
+    if size < 4 {
+        return Err(malformed("PE COFF string table size is too small"));
+    }
+    checked_range(bytes, offset, size, "PE COFF string table")
+}
+
+fn pe_coff_symbol_name(bytes: &[u8], base: u64, string_table: &[u8]) -> Result<String> {
+    let zeroes = read_u32(bytes, base, Endian::Little, "PE COFF symbol name zeroes")?;
+    if zeroes == 0 {
+        let string_offset = read_u32(
+            bytes,
+            base + 4,
+            Endian::Little,
+            "PE COFF symbol string offset",
+        )?;
+        pe_coff_string_table_name(string_table, string_offset)
+    } else {
+        read_fixed_string(bytes, base, 8, "PE COFF symbol short name")
+    }
+}
+
+fn pe_coff_string_table_name(string_table: &[u8], offset: u32) -> Result<String> {
+    if offset < 4 {
+        return Err(malformed(
+            "PE COFF symbol string offset is before string data",
+        ));
+    }
+    let start = usize::try_from(offset)
+        .map_err(|_| malformed("PE COFF symbol string offset does not fit in usize"))?;
+    let Some(rest) = string_table.get(start..) else {
+        return Err(malformed("PE COFF symbol string offset is out of range"));
+    };
+    let end = rest
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(rest.len());
+    let Some(bytes) = rest.get(..end) else {
+        return Err(malformed("PE COFF symbol string has invalid range"));
+    };
+    Ok(String::from_utf8_lossy(bytes).into_owned())
+}
+
+fn pe_coff_symbol_address(
+    sections: &[PeSection],
+    section_number: i16,
+    value: u64,
+) -> Result<Option<Address>> {
+    if section_number <= 0 {
+        return Ok(None);
+    }
+
+    let section_index = usize::try_from(i32::from(section_number) - 1)
+        .map_err(|_| malformed("PE COFF symbol section index does not fit in usize"))?;
+    let Some(section) = sections.get(section_index) else {
+        return Err(malformed("PE COFF symbol section index is out of range"));
+    };
+    section
+        .address
+        .checked_add(value)
+        .map(Some)
+        .ok_or_else(|| malformed("PE COFF symbol address overflow"))
 }
 
 fn parse_pe_exports(
@@ -2814,6 +2981,23 @@ mod tests {
     }
 
     #[test]
+    fn loads_pe32_plus_coff_symbols() {
+        let bytes = synthetic_pe32_plus_with_coff_symbols();
+        let binary = load_bytes(PathBuf::from("sample.exe"), &bytes).expect("load PE");
+
+        assert_eq!(binary.format, BinaryFormat::Pe);
+        assert_eq!(binary.symbols.len(), 2);
+        assert_eq!(binary.symbols[0].name, "_start");
+        assert_eq!(binary.symbols[0].address, Some(Address::new(0x140001000)));
+        assert_eq!(binary.symbols[1].name, "helper_long_name");
+        assert_eq!(binary.symbols[1].address, Some(Address::new(0x140001004)));
+        assert!(binary.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == DiagnosticSeverity::Note
+                && diagnostic.message.contains("debug symbols")
+        }));
+    }
+
+    #[test]
     fn loads_pe32_plus_imports_by_name_and_ordinal() {
         let bytes = synthetic_pe32_plus_with_imports();
         let binary = load_bytes(PathBuf::from("sample.exe"), &bytes).expect("load PE");
@@ -2830,7 +3014,7 @@ mod tests {
         assert_eq!(binary.imports[1].thunk, Some(Address::new(0x1400020a8)));
         assert!(binary.diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Note
-                && diagnostic.message.contains("COFF symbols")
+                && diagnostic.message.contains("debug symbols")
         }));
     }
 
@@ -2874,7 +3058,7 @@ mod tests {
         assert_eq!(binary.relocations[2].kind, "pe-high");
         assert!(binary.diagnostics.iter().any(|diagnostic| {
             diagnostic.severity == DiagnosticSeverity::Note
-                && diagnostic.message.contains("COFF symbols")
+                && diagnostic.message.contains("debug symbols")
         }));
     }
 
@@ -3156,6 +3340,46 @@ mod tests {
     }
 
     #[test]
+    fn pe_coff_symbol_table_outside_file_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus_with_coff_symbols();
+        write_u32_le(&mut bytes, 0x104 + 8, 0x900);
+
+        let error = load_bytes(PathBuf::from("bad.exe"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn pe_coff_symbol_long_name_outside_string_table_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus_with_coff_symbols();
+        write_u32_le(&mut bytes, 0x612 + 4, 0x500);
+
+        let error = load_bytes(PathBuf::from("bad.exe"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn pe_coff_symbol_section_index_out_of_range_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus_with_coff_symbols();
+        write_u16_le(&mut bytes, 0x600 + 12, 9);
+
+        let error = load_bytes(PathBuf::from("bad.exe"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
+    fn pe_coff_symbol_aux_entries_overrun_returns_clean_error() {
+        let mut bytes = synthetic_pe32_plus_with_coff_symbols();
+        bytes[0x600 + 17] = 9;
+
+        let error = load_bytes(PathBuf::from("bad.exe"), &bytes).expect_err("bad PE should fail");
+
+        assert_eq!(error.kind(), KaijuErrorKind::MalformedBinary);
+    }
+
+    #[test]
     fn pe_import_directory_outside_file_returns_clean_error() {
         let mut bytes = synthetic_pe32_plus_with_imports();
         let import_directory = pe32_plus_import_directory_offset();
@@ -3307,6 +3531,20 @@ mod tests {
 
         bytes[0x200..0x204].copy_from_slice(&[0x90, 0x90, 0xc3, 0x00]);
         bytes[0x400..0x404].copy_from_slice(&[1, 2, 3, 4]);
+
+        bytes
+    }
+
+    fn synthetic_pe32_plus_with_coff_symbols() -> Vec<u8> {
+        let mut bytes = synthetic_pe32_plus();
+        let coff = 0x104;
+        write_u32_le(&mut bytes, coff + 8, 0x600);
+        write_u32_le(&mut bytes, coff + 12, 3);
+
+        write_pe_coff_short_symbol(&mut bytes, 0x600, b"_start\0\0", 0, 1, 0);
+        write_pe_coff_long_symbol(&mut bytes, 0x612, 4, 4, 1, 1);
+        write_u32_le(&mut bytes, 0x636, 21);
+        bytes[0x63a..0x64b].copy_from_slice(b"helper_long_name\0");
 
         bytes
     }
@@ -3837,6 +4075,39 @@ mod tests {
         write_u32_le(bytes, offset + 16, spec.raw_size);
         write_u32_le(bytes, offset + 20, spec.raw_offset);
         write_u32_le(bytes, offset + 36, spec.characteristics);
+    }
+
+    fn write_pe_coff_short_symbol(
+        bytes: &mut [u8],
+        offset: usize,
+        name: &[u8; 8],
+        value: u32,
+        section_number: u16,
+        auxiliary_count: u8,
+    ) {
+        bytes[offset..offset + 8].copy_from_slice(name);
+        write_u32_le(bytes, offset + 8, value);
+        write_u16_le(bytes, offset + 12, section_number);
+        write_u16_le(bytes, offset + 14, 0x20);
+        bytes[offset + 16] = 2;
+        bytes[offset + 17] = auxiliary_count;
+    }
+
+    fn write_pe_coff_long_symbol(
+        bytes: &mut [u8],
+        offset: usize,
+        string_offset: u32,
+        value: u32,
+        section_number: u16,
+        auxiliary_count: u8,
+    ) {
+        write_u32_le(bytes, offset, 0);
+        write_u32_le(bytes, offset + 4, string_offset);
+        write_u32_le(bytes, offset + 8, value);
+        write_u16_le(bytes, offset + 12, section_number);
+        write_u16_le(bytes, offset + 14, 0x20);
+        bytes[offset + 16] = 2;
+        bytes[offset + 17] = auxiliary_count;
     }
 
     fn write_u16_le(bytes: &mut [u8], offset: usize, value: u16) {

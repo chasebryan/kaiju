@@ -120,3 +120,8 @@ The ELF dynamic relocation slice added bounded REL/RELA relocation-table
 parsing, undefined `.dynsym` import rows, relocation-to-import thunk linking,
 malformed relocation-table tests, and CLI coverage for ELF imports and
 relocations without claiming dependency/version resolution.
+
+The PE COFF symbol slice added bounded COFF symbol-table parsing for inline and
+string-table names, auxiliary-entry skipping, section-relative symbol addresses,
+malformed COFF symbol tests, and CLI coverage for PE symbols without claiming
+debug/PDB metadata.

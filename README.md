@@ -27,6 +27,7 @@ what works:
 - ELF symbol tables
 - ELF dynamic imports
 - ELF relocation tables
+- PE COFF symbols
 - PE import tables
 - PE export tables
 - PE base relocations

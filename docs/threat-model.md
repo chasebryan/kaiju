@@ -33,6 +33,8 @@ binaries. The default stance is defensive parsing.
   forwarder parsing tests.
 - Bounded PE base relocation directory, block-size, entry-alignment, and
   block-overrun parsing tests.
+- Bounded PE COFF symbol table, string-table name, section-index, and
+  auxiliary-entry parsing tests.
 
 ## Required Rules
 

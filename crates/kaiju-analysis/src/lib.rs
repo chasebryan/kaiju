@@ -99,6 +99,9 @@ pub fn default_analysis_passes(config: AnalysisConfig) -> Vec<Box<dyn AnalysisPa
             options: config.cfg_options,
         }),
         Box::new(FunctionDiscoveryPass),
+        Box::new(FunctionCfgPass {
+            options: config.cfg_options,
+        }),
         Box::new(DataReferencePass),
         Box::new(CrossReferenceSummaryPass),
     ]
@@ -269,6 +272,49 @@ impl AnalysisPass for FunctionDiscoveryPass {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FunctionCfgPass {
+    pub options: CfgOptions,
+}
+
+impl AnalysisPass for FunctionCfgPass {
+    fn name(&self) -> &'static str {
+        "function-cfg"
+    }
+
+    fn run(&self, project: &mut Project) -> Result<AnalysisReport> {
+        let stats = record_discovered_function_cfgs(project, self.options);
+
+        project.add_analysis_fact(kaiju_project::AnalysisFact::new(
+            self.name(),
+            "functions",
+            stats.functions.to_string(),
+        ));
+        project.add_analysis_fact(kaiju_project::AnalysisFact::new(
+            self.name(),
+            "blocks",
+            stats.blocks.to_string(),
+        ));
+        project.add_analysis_fact(kaiju_project::AnalysisFact::new(
+            self.name(),
+            "edges",
+            stats.edges.to_string(),
+        ));
+        project.add_analysis_fact(kaiju_project::AnalysisFact::new(
+            self.name(),
+            "skipped",
+            stats.skipped.to_string(),
+        ));
+
+        let facts = stats.functions + stats.blocks + stats.edges;
+        let mut report = AnalysisReport::new(self.name()).with_facts(facts);
+        for warning in stats.warnings {
+            report = report.with_warning(warning);
+        }
+        Ok(report)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DataReferencePass;
 
 impl AnalysisPass for DataReferencePass {
@@ -366,6 +412,15 @@ pub struct DataReferenceStats {
     pub xrefs_added: usize,
     pub references: usize,
     pub string_targets: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FunctionCfgStats {
+    pub functions: usize,
+    pub blocks: usize,
+    pub edges: usize,
+    pub skipped: usize,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -558,6 +613,38 @@ pub fn record_cfg(project: &mut Project, graph: &ControlFlowGraph) {
             })
             .collect(),
     });
+}
+
+pub fn record_discovered_function_cfgs(
+    project: &mut Project,
+    options: CfgOptions,
+) -> FunctionCfgStats {
+    let function_starts = project.functions().keys().copied().collect::<Vec<_>>();
+    let mut stats = FunctionCfgStats::default();
+
+    for function_start in function_starts {
+        if project.basic_block(function_start).is_some() {
+            stats.skipped += 1;
+            continue;
+        }
+
+        match build_cfg(&project.binary, function_start, options) {
+            Ok(graph) => {
+                stats.functions += 1;
+                stats.blocks += graph.blocks.len();
+                stats.edges += graph.edges.len();
+                record_cfg(project, &graph);
+            }
+            Err(error) => {
+                stats.skipped += 1;
+                stats
+                    .warnings
+                    .push(format!("CFG skipped for {function_start}: {error}"));
+            }
+        }
+    }
+
+    stats
 }
 
 pub fn record_data_references(project: &mut Project) -> Result<DataReferenceStats> {
@@ -1159,7 +1246,7 @@ mod tests {
         let reports = run_default_passes(&mut project, AnalysisConfig::default())
             .expect("run default passes");
 
-        assert_eq!(reports.len(), 6);
+        assert_eq!(reports.len(), 7);
         assert!(project.function(Address::new(0x6000)).is_some());
         assert!(!project.basic_blocks().is_empty());
         assert!(!project.xrefs().is_empty());
@@ -1167,6 +1254,10 @@ mod tests {
             .analysis_facts()
             .iter()
             .any(|fact| fact.namespace == "function-discovery"));
+        assert!(project
+            .analysis_facts()
+            .iter()
+            .any(|fact| fact.namespace == "function-cfg"));
         assert!(project
             .analysis_facts()
             .iter()
@@ -1212,6 +1303,7 @@ mod tests {
             Some("symbol_func")
         );
         assert!(project.function(Address::new(0x8006)).is_some());
+        assert!(project.basic_block(Address::new(0x8006)).is_some());
         assert!(project.xrefs().contains(&CrossReference {
             from: Address::new(0x8000),
             to: Address::new(0x8006),
@@ -1227,6 +1319,39 @@ mod tests {
             fact.namespace == "function-discovery"
                 && fact.key == "call_targets"
                 && fact.value == "1"
+        }));
+        assert!(project.analysis_facts().iter().any(|fact| {
+            fact.namespace == "function-cfg" && fact.key == "functions" && fact.value == "1"
+        }));
+        assert!(project.analysis_facts().iter().any(|fact| {
+            fact.namespace == "function-cfg" && fact.key == "blocks" && fact.value == "1"
+        }));
+    }
+
+    #[test]
+    fn records_cfgs_for_discovered_call_target_functions() {
+        let binary = test_binary(
+            Address::new(0xa000),
+            vec![0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xc3],
+            ArchitectureId::X86_64,
+        );
+        let mut project = Project::from_loaded_binary(binary);
+
+        let reports = run_default_passes(&mut project, AnalysisConfig::default())
+            .expect("run default passes");
+        let function_cfg = reports
+            .iter()
+            .find(|report| report.pass_name == "function-cfg")
+            .expect("function cfg report");
+
+        assert_eq!(function_cfg.facts_added, 3);
+        assert!(function_cfg.warnings.is_empty());
+        assert!(project.function(Address::new(0xa006)).is_some());
+        assert!(project.basic_block(Address::new(0xa006)).is_some());
+        assert!(project.xrefs().contains(&CrossReference {
+            from: Address::new(0xa006),
+            to: Address::new(0xa006),
+            kind: CrossReferenceKind::Flow,
         }));
     }
 

@@ -21,7 +21,7 @@
     "functions": 0,
     "blocks": 0,
     "xrefs": 0,
-    "analysis_facts": 7
+    "analysis_facts": 11
   },
   "functions": [],
   "blocks": [],
@@ -55,6 +55,26 @@
     {
       "namespace": "data-references",
       "key": "string_targets",
+      "value": "0"
+    },
+    {
+      "namespace": "function-cfg",
+      "key": "blocks",
+      "value": "0"
+    },
+    {
+      "namespace": "function-cfg",
+      "key": "edges",
+      "value": "0"
+    },
+    {
+      "namespace": "function-cfg",
+      "key": "functions",
+      "value": "0"
+    },
+    {
+      "namespace": "function-cfg",
+      "key": "skipped",
       "value": "0"
     },
     {

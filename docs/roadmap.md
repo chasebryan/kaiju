@@ -62,7 +62,8 @@
 Phase 8 introduced the first in-memory project state model. It stores loaded
 binary metadata plus labels, comments, functions, basic block summaries, CFG
 edges, extracted strings, loader symbols, cross-references, and simple analysis
-facts. Persistence and default analysis-pass orchestration remain future work.
+facts. Persistence remains future work; default analysis-pass orchestration is
+covered by later foundation slices.
 
 Phase 9 through Phase 13 added the first IR crate and pretty printer, a minimal
 x86-64 lifter, default analysis-pass orchestration, a plugin API skeleton, and a
@@ -159,3 +160,10 @@ decoding for `lea` and `mov`, records mapped data/read/write xrefs from decoded
 basic blocks, counts string-target references, and exposes those facts through
 existing `analyze`, `xrefs`, and project JSON surfaces without claiming full
 data-flow analysis, pointer tracking, or complete instruction coverage.
+
+The multi-function CFG slice added a bounded default analysis pass that builds
+direct-branch CFGs for discovered functions that do not already have a starting
+block. This lets direct call targets receive block summaries, flow xrefs, and
+downstream data-reference analysis without claiming prologue scanning,
+recursive whole-program recovery, indirect call resolution, or jump-table
+handling.

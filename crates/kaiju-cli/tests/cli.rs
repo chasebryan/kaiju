@@ -553,7 +553,7 @@ fn cli_analyze_reports_project_summary() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
-    assert!(stdout.contains("Passes: 6"));
+    assert!(stdout.contains("Passes: 7"));
     assert!(stdout.contains("Dependencies: 0"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
@@ -563,6 +563,7 @@ fn cli_analyze_reports_project_summary() {
     assert!(stdout.contains("Xrefs:"));
     assert!(stdout.contains("entrypoint-cfg"));
     assert!(stdout.contains("function-discovery"));
+    assert!(stdout.contains("function-cfg"));
     assert!(stdout.contains("data-references"));
 
     let _ = fs::remove_file(path);
@@ -578,7 +579,7 @@ fn cli_analyze_raw_fixture_succeeds_with_warnings() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf-8");
-    assert!(stdout.contains("Passes: 6"));
+    assert!(stdout.contains("Passes: 7"));
     assert!(stdout.contains("Dependencies: 0"));
     assert!(stdout.contains("Imports: 0"));
     assert!(stdout.contains("Exports: 0"));
@@ -639,6 +640,10 @@ fn cli_functions_reports_direct_call_target_functions() {
     assert!(stdout.contains("Start  Name  Blocks"));
     assert!(stdout.contains("0x0000000000401000"));
     assert!(stdout.contains("0x0000000000401006"));
+    assert!(stdout.lines().any(|line| {
+        let columns = line.split_whitespace().collect::<Vec<_>>();
+        columns == ["0x0000000000401006", "-", "1"]
+    }));
 
     let xrefs = Command::new(env!("CARGO_BIN_EXE_kaiju"))
         .arg("xrefs")
@@ -651,6 +656,10 @@ fn cli_functions_reports_direct_call_target_functions() {
     assert!(stdout.contains("0x0000000000401000"));
     assert!(stdout.contains("0x0000000000401006"));
     assert!(stdout.contains("call"));
+    assert!(stdout.lines().any(|line| {
+        let columns = line.split_whitespace().collect::<Vec<_>>();
+        columns == ["0x0000000000401006", "0x0000000000401006", "flow"]
+    }));
 
     let _ = fs::remove_file(path);
 }

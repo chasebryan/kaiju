@@ -204,7 +204,14 @@ The first GUI surface is the native Rust `kaiju-workbench` app. It uses the same
 headless loader and default analysis pipeline as `kaiju analyze`, then renders a
 black, red, and white project browser, disassembly view, strings view, CFG view,
 and IR view in a desktop window. It accepts an optional file path at startup and
-also exposes a path field inside the workbench for loading another binary.
+also exposes desktop file actions for opening binaries, opening current
+`.kaiju` package directories, and saving the loaded project as a new `.kaiju`
+package.
+
+The workbench keeps a selected function/address shared across the browser,
+strings table, xref table, disassembly, CFG, and IR views. Loader diagnostics,
+analysis warnings, status history, and recent binaries/packages are surfaced in
+native panels so the GUI is no longer path-textbox-first.
 
 This is intentionally not a full project database yet. Future GUI work should
 add persistence, annotation editing, richer navigation contracts, and eventually

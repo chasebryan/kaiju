@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Kaiju Workbench
+Comment=Native reverse-engineering workbench
+Exec=kaiju-workbench %F
+Icon=kaiju-workbench
+Terminal=false
+Categories=Development;Debugger;Security;
+MimeType=application/octet-stream;
+StartupWMClass=kaiju-workbench

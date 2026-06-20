@@ -210,3 +210,8 @@ The first GUI prototype slice added a native Rust `kaiju-workbench` app. It
 renders a black, red, and white workbench with a project browser, disassembly
 view, strings view, CFG view, and IR view backed by the existing loader,
 project, analysis, disassembly, CFG, and IR crates.
+
+The workbench shell slice added native file actions for binaries and `.kaiju`
+packages, package save, recent items, diagnostics/log panels, synchronized
+function/address navigation across views, and a Linux AppDir/AppImage packaging
+script that uses the README SVG as the desktop icon.

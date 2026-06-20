@@ -54,7 +54,8 @@ what works:
 - project JSON export
 - safe `.kaiju` project package snapshots
 - read-only `.kaiju` project package inspection
-- native Rust GUI workbench
+- native Rust GUI workbench with binary/package open, package save,
+  diagnostics, logs, and synchronized function/address navigation
 
 try:
 
@@ -78,6 +79,7 @@ cargo run -p kaiju-cli -- ir tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- xrefs tests/fixtures/raw.bin
 cargo run -p kaiju-cli -- network tests/fixtures/network-evidence.txt
 cargo run -p kaiju-workbench -- tests/fixtures/raw.bin
+scripts/package-kaiju-workbench-linux.sh
 ```
 
 not yet:

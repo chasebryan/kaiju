@@ -61,7 +61,10 @@ because raw input has no entrypoint and no known architecture.
 - `docs/snapshot-testing.md` matches the fixtures in `tests/snapshots/`.
 - `docs/threat-model.md` covers new parser or execution surfaces.
 - No decompiler, dynamic plugin loading, or script execution is claimed before
-  it exists. GUI claims are limited to the native `kaiju-workbench` prototype.
+  it exists. GUI claims are limited to the native `kaiju-workbench` prototype
+  and its package-aware file actions.
+- Linux workbench packaging can be smoke-built with
+  `scripts/package-kaiju-workbench-linux.sh`.
 
 ## Security Checks
 
